@@ -1,9 +1,60 @@
-//! Card drawing. Everything is built from primitives so the game ships with no
-//! image or font assets.
+//! Card drawing. Cards are built from primitives; the only asset is the
+//! embedded UI font.
 
 use macroquad::prelude::*;
 use soli_core::{Card, Suit};
 use std::f32::consts::PI;
+use std::sync::OnceLock;
+
+static FONT: OnceLock<Font> = OnceLock::new();
+
+/// Loads the embedded font. Must run once, inside the macroquad context, before
+/// anything draws text.
+pub fn init_font() {
+    let font = load_ttf_font_from_bytes(include_bytes!("../assets/fonts/Inter-SemiBold.ttf"))
+        .expect("embedded font is valid");
+    let _ = FONT.set(font);
+}
+
+fn font() -> &'static Font {
+    FONT.get().expect("render::init_font was called")
+}
+
+/// Glyphs are rasterised per pixel size. Coordinates are logical pixels, so
+/// rasterise at the physical size and scale back down to keep text crisp on
+/// high-DPI displays. Returns (font_size, font_scale).
+fn font_px(size: f32) -> (u16, f32) {
+    let dpi = screen_dpi_scale();
+    let px = (size * dpi).round().max(1.0);
+    (px as u16, size / px)
+}
+
+pub fn measure(text: &str, size: f32) -> TextDimensions {
+    let (px, scale) = font_px(size);
+    measure_text(text, Some(font()), px, scale)
+}
+
+/// Draws `text` with its baseline at `y`.
+pub fn text(text: &str, x: f32, y: f32, size: f32, color: Color) {
+    text_rotated(text, x, y, size, color, 0.0);
+}
+
+fn text_rotated(text: &str, x: f32, y: f32, size: f32, color: Color, rotation: f32) {
+    let (px, scale) = font_px(size);
+    draw_text_ex(
+        text,
+        x,
+        y,
+        TextParams {
+            font: Some(font()),
+            font_size: px,
+            font_scale: scale,
+            rotation,
+            color,
+            ..Default::default()
+        },
+    );
+}
 
 pub const TABLE: Color = Color::new(0.10, 0.40, 0.22, 1.0);
 const CARD_FACE: Color = Color::new(0.99, 0.99, 0.97, 1.0);
@@ -13,6 +64,7 @@ const BLACK_INK: Color = Color::new(0.08, 0.08, 0.10, 1.0);
 const BACK: Color = Color::new(0.14, 0.24, 0.55, 1.0);
 const BACK_PATTERN: Color = Color::new(0.30, 0.42, 0.75, 1.0);
 const SLOT: Color = Color::new(0.08, 0.33, 0.18, 1.0);
+const SLOT_MARK: Color = Color::new(0.30, 0.52, 0.38, 1.0);
 pub const HIGHLIGHT: Color = Color::new(1.0, 0.85, 0.2, 0.9);
 
 pub fn rounded_rect(r: Rect, radius: f32, color: Color) {
@@ -37,16 +89,22 @@ fn corner_radius(r: Rect) -> f32 {
 pub fn draw_slot(r: Rect, label: Option<&str>) {
     rounded_rect(r, corner_radius(r), SLOT);
     if let Some(text) = label {
-        let size = (r.w * 0.4) as u16;
-        let m = measure_text(text, None, size, 1.0);
-        draw_text(
+        let size = r.w * 0.4;
+        let m = measure(text, size);
+        self::text(
             text,
             r.x + (r.w - m.width) / 2.0,
             r.y + (r.h + m.offset_y) / 2.0,
-            size as f32,
-            Color::new(0.30, 0.52, 0.38, 1.0),
+            size,
+            SLOT_MARK,
         );
     }
+}
+
+/// Ring shown on an empty stock when clicking it will recycle the waste.
+pub fn draw_recycle_mark(r: Rect) {
+    let c = r.center();
+    draw_circle_lines(c.x, c.y, r.w * 0.22, (r.w * 0.05).max(1.5), SLOT_MARK);
 }
 
 pub fn draw_outline(r: Rect, color: Color) {
@@ -127,31 +185,21 @@ fn ink(card: Card) -> Color {
 fn draw_face(card: Card, r: Rect) {
     let color = ink(card);
     let label = card.rank_label();
-    let font_size = (r.w * 0.26).round() as u16;
-    let m = measure_text(label, None, font_size, 1.0);
-    let pad = r.w * 0.07;
+    let font_size = r.w * 0.24;
+    let m = measure(label, font_size);
+    let pad = r.w * 0.08;
 
     // Top-left index: rank with a small suit beneath it.
     let text_x = r.x + pad;
     let text_y = r.y + pad + m.offset_y;
-    draw_text(label, text_x, text_y, font_size as f32, color);
+    text(label, text_x, text_y, font_size, color);
     let small = r.w * 0.16;
     let index_cx = text_x + m.width / 2.0;
     draw_suit(card.suit, vec2(index_cx, text_y + small * 0.8), small, color);
 
     // Bottom-right index, rotated 180 degrees.
     let br = vec2(r.x + r.w - pad, r.y + r.h - pad - m.offset_y);
-    draw_text_ex(
-        label,
-        br.x,
-        br.y,
-        TextParams {
-            font_size,
-            rotation: PI,
-            color,
-            ..Default::default()
-        },
-    );
+    text_rotated(label, br.x, br.y, font_size, color, PI);
     draw_suit_flipped(card.suit, vec2(br.x - m.width / 2.0, br.y - small * 0.8), small, color);
 
     let center = vec2(r.x + r.w / 2.0, r.y + r.h / 2.0);
@@ -159,9 +207,9 @@ fn draw_face(card: Card, r: Rect) {
         // Court cards: framed letter with a suit on either side.
         let frame = Rect::new(r.x + r.w * 0.25, r.y + r.h * 0.2, r.w * 0.5, r.h * 0.6);
         draw_rectangle_lines(frame.x, frame.y, frame.w, frame.h, (r.w * 0.02).max(1.0), color);
-        let big = (r.w * 0.38).round() as u16;
-        let bm = measure_text(label, None, big, 1.0);
-        draw_text(label, center.x - bm.width / 2.0, center.y + bm.offset_y / 2.0 - r.h * 0.06, big as f32, color);
+        let big = r.w * 0.36;
+        let bm = measure(label, big);
+        text(label, center.x - bm.width / 2.0, center.y + bm.offset_y / 2.0 - r.h * 0.06, big, color);
         draw_suit(card.suit, vec2(center.x, center.y + r.h * 0.15), r.w * 0.2, color);
     } else {
         draw_suit(card.suit, center + vec2(0.0, r.h * 0.04), r.w * 0.42, color);

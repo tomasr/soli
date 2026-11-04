@@ -1,11 +1,12 @@
 use macroquad::prelude::*;
 use soli_core::{Klondike, PileId};
 
-pub const STATUS_HEIGHT: f32 = 30.0;
+const STATUS_HEIGHT: f32 = 30.0;
 
 /// Screen geometry, recomputed every frame so the table follows window resizes.
 pub struct Layout {
     pub card: Vec2,
+    pub status_height: f32,
     pub gap: f32,
     x0: f32,
     top_y: f32,
@@ -19,24 +20,28 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// `sw`/`sh` are in logical pixels (macroquad's coordinate space with
+    /// `high_dpi`), so nothing here needs to know about the display scale.
     pub fn compute(sw: f32, sh: f32) -> Self {
+        let status_height = STATUS_HEIGHT;
         const GAP_RATIO: f32 = 0.18;
         const ASPECT: f32 = 1.4;
         let margin = (sw.min(sh) * 0.03).max(8.0);
         let by_width = (sw - 2.0 * margin) / (7.0 + 6.0 * GAP_RATIO);
         // Leave room for the top row plus a reasonably long tableau column.
-        let by_height = (sh - STATUS_HEIGHT - 2.0 * margin) / (ASPECT * 3.6);
+        let by_height = (sh - status_height - 2.0 * margin) / (ASPECT * 3.6);
         let w = by_width.min(by_height).max(20.0);
         let h = w * ASPECT;
         let gap = w * GAP_RATIO;
         let total = 7.0 * w + 6.0 * gap;
         Layout {
             card: vec2(w, h),
+            status_height,
             gap,
             x0: (sw - total) / 2.0,
             top_y: margin,
             tableau_y: margin + h + gap * 1.5,
-            bottom: sh - STATUS_HEIGHT - margin * 0.5,
+            bottom: sh - status_height - margin * 0.5,
             fan_up: h * 0.27,
             fan_down: h * 0.11,
             fan_waste: w * 0.24,
