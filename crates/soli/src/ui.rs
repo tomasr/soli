@@ -12,7 +12,12 @@ pub const ACCENT: Color = Color::new(1.0, 0.85, 0.35, 1.0);
 pub fn panel(w: f32, h: f32) -> Rect {
     let (sw, sh) = (screen_width(), screen_height());
     draw_rectangle(0.0, 0.0, sw, sh, SCRIM);
-    let r = Rect::new((sw - w.min(sw)) / 2.0, (sh - h.min(sh)) / 2.0, w.min(sw), h.min(sh));
+    let r = Rect::new(
+        (sw - w.min(sw)) / 2.0,
+        (sh - h.min(sh)) / 2.0,
+        w.min(sw),
+        h.min(sh),
+    );
     render::rounded_rect(r, 14.0, PANEL);
     r
 }
@@ -41,7 +46,13 @@ pub fn toast(text: &str, age: f64, bottom: f32) {
     let r = Rect::new((screen_width() - w) / 2.0, bottom - h - 12.0, w, h);
     render::rounded_rect(r, 8.0, Color::new(0.0, 0.0, 0.0, 0.7 * alpha));
     let baseline = r.y + (h + m.offset_y) / 2.0;
-    render::text(text, r.x + 14.0, baseline, size, Color::new(1.0, 1.0, 1.0, alpha));
+    render::text(
+        text,
+        r.x + 14.0,
+        baseline,
+        size,
+        Color::new(1.0, 1.0, 1.0, alpha),
+    );
 }
 
 pub fn format_time(secs: u32) -> String {

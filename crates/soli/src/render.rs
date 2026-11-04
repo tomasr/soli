@@ -79,10 +79,22 @@ impl Table {
 }
 
 pub const TABLES: [Table; 4] = [
-    Table { name: "Green", felt: Color::new(0.10, 0.40, 0.22, 1.0) },
-    Table { name: "Blue", felt: Color::new(0.09, 0.24, 0.42, 1.0) },
-    Table { name: "Burgundy", felt: Color::new(0.38, 0.09, 0.14, 1.0) },
-    Table { name: "Slate", felt: Color::new(0.21, 0.24, 0.27, 1.0) },
+    Table {
+        name: "Green",
+        felt: Color::new(0.10, 0.40, 0.22, 1.0),
+    },
+    Table {
+        name: "Blue",
+        felt: Color::new(0.09, 0.24, 0.42, 1.0),
+    },
+    Table {
+        name: "Burgundy",
+        felt: Color::new(0.38, 0.09, 0.14, 1.0),
+    },
+    Table {
+        name: "Slate",
+        felt: Color::new(0.21, 0.24, 0.27, 1.0),
+    },
 ];
 
 pub enum Pattern {
@@ -230,8 +242,20 @@ fn draw_back(r: Rect, back: &Back) {
             let step = b.w / 6.0;
             let mut d = -b.h;
             while d < b.w {
-                clipped_line(b, vec2(b.x + d, b.y), vec2(b.x + d + b.h, b.y + b.h), thick, ink);
-                clipped_line(b, vec2(b.x + d + b.h, b.y), vec2(b.x + d, b.y + b.h), thick, ink);
+                clipped_line(
+                    b,
+                    vec2(b.x + d, b.y),
+                    vec2(b.x + d + b.h, b.y + b.h),
+                    thick,
+                    ink,
+                );
+                clipped_line(
+                    b,
+                    vec2(b.x + d + b.h, b.y),
+                    vec2(b.x + d, b.y + b.h),
+                    thick,
+                    ink,
+                );
                 d += step;
             }
         }
@@ -239,7 +263,13 @@ fn draw_back(r: Rect, back: &Back) {
             let step = b.w / 7.0;
             let mut d = -b.h;
             while d < b.w {
-                clipped_line(b, vec2(b.x + d, b.y), vec2(b.x + d + b.h, b.y + b.h), thick * 3.0, ink);
+                clipped_line(
+                    b,
+                    vec2(b.x + d, b.y),
+                    vec2(b.x + d + b.h, b.y + b.h),
+                    thick * 3.0,
+                    ink,
+                );
                 d += step;
             }
         }
@@ -339,7 +369,12 @@ fn draw_face(card: Card, r: Rect) {
     let index_cx = r.x + pad + column;
     let text_y = r.y + pad + m.offset_y;
     text(label, index_cx - m.width / 2.0, text_y, font_size, color);
-    draw_suit(card.suit, vec2(index_cx, text_y + small * 0.85), small, color);
+    draw_suit(
+        card.suit,
+        vec2(index_cx, text_y + small * 0.85),
+        small,
+        color,
+    );
 
     let br_cx = r.x + r.w - pad - column;
     let br_y = r.y + r.h - pad - m.offset_y;
@@ -366,12 +401,24 @@ fn draw_face(card: Card, r: Rect) {
             let frame = Rect::new(r.x + r.w * 0.24, r.y + r.h * 0.17, r.w * 0.52, r.h * 0.66);
             let tint = Color::new(color.r, color.g, color.b, 0.08);
             draw_rectangle(frame.x, frame.y, frame.w, frame.h, tint);
-            draw_rectangle_lines(frame.x, frame.y, frame.w, frame.h, (r.w * 0.02).max(1.0), color);
+            draw_rectangle_lines(
+                frame.x,
+                frame.y,
+                frame.w,
+                frame.h,
+                (r.w * 0.02).max(1.0),
+                color,
+            );
             let big = r.w * 0.36;
             let bm = measure(label, big);
             let baseline = center.y + bm.offset_y / 2.0 - r.h * 0.07;
             text(label, center.x - bm.width / 2.0, baseline, big, color);
-            draw_suit(card.suit, vec2(center.x, center.y + r.h * 0.15), r.w * 0.2, color);
+            draw_suit(
+                card.suit,
+                vec2(center.x, center.y + r.h * 0.15),
+                r.w * 0.2,
+                color,
+            );
         }
     }
 }

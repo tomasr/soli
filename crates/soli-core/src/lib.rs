@@ -2,8 +2,11 @@
 //! and reused by any front end.
 
 pub mod card;
+pub mod freecell;
+pub mod game;
 pub mod klondike;
 pub mod rng;
+pub mod spider;
 
 pub use card::{Card, Color, Suit};
-pub use klondike::{DrawMode, Hint, Klondike, PileId};
+pub use game::{DrawMode, Game, Hint, PileId, SpiderSuits, Variant};

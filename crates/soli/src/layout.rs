@@ -1,10 +1,11 @@
 use macroquad::prelude::*;
-use soli_core::{Klondike, PileId};
+use soli_core::{Game, PileId, Variant};
 
 const STATUS_HEIGHT: f32 = 30.0;
 
 /// Screen geometry, recomputed every frame so the table follows window resizes.
 pub struct Layout {
+    variant: Variant,
     pub card: Vec2,
     pub status_height: f32,
     pub gap: f32,
@@ -17,24 +18,36 @@ pub struct Layout {
     fan_down: f32,
     /// Horizontal spacing of the draw-3 waste fan.
     fan_waste: f32,
+    /// Horizontal spacing between Spider's remaining deals in the stock.
+    fan_stock: f32,
+}
+
+fn columns(variant: Variant) -> usize {
+    match variant {
+        Variant::Klondike(_) => 7,
+        Variant::Spider(_) => 10,
+        Variant::FreeCell => 8,
+    }
 }
 
 impl Layout {
     /// `sw`/`sh` are in logical pixels (macroquad's coordinate space with
     /// `high_dpi`), so nothing here needs to know about the display scale.
-    pub fn compute(sw: f32, sh: f32) -> Self {
+    pub fn compute(sw: f32, sh: f32, variant: Variant) -> Self {
         let status_height = STATUS_HEIGHT;
         const GAP_RATIO: f32 = 0.18;
         const ASPECT: f32 = 1.4;
+        let cols = columns(variant) as f32;
         let margin = (sw.min(sh) * 0.03).max(8.0);
-        let by_width = (sw - 2.0 * margin) / (7.0 + 6.0 * GAP_RATIO);
+        let by_width = (sw - 2.0 * margin) / (cols + (cols - 1.0) * GAP_RATIO);
         // Leave room for the top row plus a reasonably long tableau column.
         let by_height = (sh - status_height - 2.0 * margin) / (ASPECT * 3.6);
         let w = by_width.min(by_height).max(20.0);
         let h = w * ASPECT;
         let gap = w * GAP_RATIO;
-        let total = 7.0 * w + 6.0 * gap;
+        let total = cols * w + (cols - 1.0) * gap;
         Layout {
+            variant,
             card: vec2(w, h),
             status_height,
             gap,
@@ -45,6 +58,7 @@ impl Layout {
             fan_up: h * 0.27,
             fan_down: h * 0.11,
             fan_waste: w * 0.24,
+            fan_stock: w * 0.12,
         }
     }
 
@@ -54,11 +68,18 @@ impl Layout {
 
     /// Top-left of a pile's base slot.
     pub fn slot(&self, pile: PileId) -> Vec2 {
-        match pile {
-            PileId::Stock => vec2(self.column_x(0), self.top_y),
-            PileId::Waste => vec2(self.column_x(1), self.top_y),
-            PileId::Foundation(i) => vec2(self.column_x(3 + i), self.top_y),
-            PileId::Tableau(i) => vec2(self.column_x(i), self.tableau_y),
+        let top = |col: usize| vec2(self.column_x(col), self.top_y);
+        match (self.variant, pile) {
+            (_, PileId::Tableau(i)) => vec2(self.column_x(i), self.tableau_y),
+            (Variant::Klondike(_), PileId::Stock) => top(0),
+            (Variant::Klondike(_), PileId::Waste) => top(1),
+            (Variant::Klondike(_), PileId::Foundation(i)) => top(3 + i),
+            (Variant::Spider(_), PileId::Stock) => top(0),
+            (Variant::Spider(_), PileId::Foundation(i)) => top(2 + i),
+            (Variant::FreeCell, PileId::Foundation(i)) => top(i),
+            (Variant::FreeCell, PileId::Cell(i)) => top(4 + i),
+            // Piles the variant doesn't have are never drawn.
+            _ => vec2(-1000.0, -1000.0),
         }
     }
 
@@ -67,14 +88,19 @@ impl Layout {
     }
 
     /// Top-left position of every card in a pile, bottom card first.
-    pub fn card_positions(&self, game: &Klondike, pile: PileId) -> Vec<Vec2> {
+    pub fn card_positions(&self, game: &dyn Game, pile: PileId) -> Vec<Vec2> {
         let cards = game.pile(pile);
         let base = self.slot(pile);
         match pile {
-            PileId::Stock | PileId::Foundation(_) => vec![base; cards.len()],
+            PileId::Stock if matches!(self.variant, Variant::Spider(_)) => {
+                // One small step per remaining deal of ten.
+                (0..cards.len())
+                    .map(|i| base + vec2((i / 10) as f32 * self.fan_stock, 0.0))
+                    .collect()
+            }
+            PileId::Stock | PileId::Foundation(_) | PileId::Cell(_) => vec![base; cards.len()],
             PileId::Waste => {
-                let fanned = game.waste_visible();
-                let first_fanned = cards.len() - fanned;
+                let first_fanned = cards.len() - game.waste_fan();
                 (0..cards.len())
                     .map(|i| {
                         let step = i.saturating_sub(first_fanned) as f32;

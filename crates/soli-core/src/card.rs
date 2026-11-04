@@ -29,12 +29,30 @@ pub struct Card {
     pub rank: u8,
     pub suit: Suit,
     pub face_up: bool,
+    /// Distinguishes identical cards in multi-deck games (Spider). Always 0
+    /// for single-deck games.
+    pub copy: u8,
 }
 
 impl Card {
     pub fn new(rank: u8, suit: Suit) -> Self {
         debug_assert!((1..=13).contains(&rank));
-        Card { rank, suit, face_up: false }
+        Card {
+            rank,
+            suit,
+            face_up: false,
+            copy: 0,
+        }
+    }
+
+    pub fn turned_up(mut self) -> Self {
+        self.face_up = true;
+        self
+    }
+
+    /// The card cannot be confused with any other card in play.
+    pub fn id(self) -> (u8, Suit, u8) {
+        (self.rank, self.suit, self.copy)
     }
 
     pub fn color(self) -> Color {

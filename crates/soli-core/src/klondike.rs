@@ -1,40 +1,9 @@
 use crate::card::Card;
+use crate::game::{DrawMode, Game, Hint, History, PileId, Variant, rules};
 use crate::rng::SplitMix64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DrawMode {
-    One,
-    Three,
-}
-
-impl DrawMode {
-    pub fn count(self) -> usize {
-        match self {
-            DrawMode::One => 1,
-            DrawMode::Three => 3,
-        }
-    }
-}
-
-/// A suggested next step, as returned by [`Klondike::hints`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hint {
-    Move { from: PileId, count: usize, to: PileId },
-    Draw,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PileId {
-    Stock,
-    Waste,
-    Foundation(usize),
-    Tableau(usize),
-}
-
-impl PileId {
-    pub const FOUNDATIONS: usize = 4;
-    pub const TABLEAUS: usize = 7;
-}
+const FOUNDATIONS: usize = 4;
+const TABLEAUS: usize = 7;
 
 /// Everything that changes during play. Small enough (52 cards) that undo just
 /// keeps a snapshot of it per move.
@@ -42,26 +11,26 @@ impl PileId {
 struct Board {
     stock: Vec<Card>,
     waste: Vec<Card>,
-    foundations: [Vec<Card>; PileId::FOUNDATIONS],
-    tableau: [Vec<Card>; PileId::TABLEAUS],
+    foundations: [Vec<Card>; FOUNDATIONS],
+    tableau: [Vec<Card>; TABLEAUS],
     /// How many waste cards from the latest draw are still showing (draw-3 fan).
     waste_visible: usize,
     moves: u32,
 }
 
-/// A board snapshot taken before a move, for undo.
-struct Snapshot {
-    board: Board,
-    /// Made by the game (auto-move, auto-finish) rather than the player. Undo
-    /// rolls these back together with the player move that preceded them.
-    automatic: bool,
-}
-
 pub struct Klondike {
     board: Board,
-    history: Vec<Snapshot>,
+    history: History<Board>,
     draw_mode: DrawMode,
     seed: u64,
+}
+
+fn foundations() -> impl Iterator<Item = PileId> {
+    (0..FOUNDATIONS).map(PileId::Foundation)
+}
+
+fn tableaus() -> impl Iterator<Item = PileId> {
+    (0..TABLEAUS).map(PileId::Tableau)
 }
 
 impl Klondike {
@@ -69,7 +38,7 @@ impl Klondike {
         let mut deck = Card::deck();
         SplitMix64::new(seed).shuffle(&mut deck);
 
-        let mut tableau: [Vec<Card>; PileId::TABLEAUS] = Default::default();
+        let mut tableau: [Vec<Card>; TABLEAUS] = Default::default();
         for (i, pile) in tableau.iter_mut().enumerate() {
             for _ in 0..=i {
                 pile.push(deck.pop().expect("deck has enough cards"));
@@ -86,37 +55,14 @@ impl Klondike {
                 waste_visible: 0,
                 moves: 0,
             },
-            history: Vec::new(),
+            history: History::new(),
             draw_mode,
             seed,
         }
     }
 
-    pub fn seed(&self) -> u64 {
-        self.seed
-    }
-
     pub fn draw_mode(&self) -> DrawMode {
         self.draw_mode
-    }
-
-    pub fn moves(&self) -> u32 {
-        self.board.moves
-    }
-
-    /// Number of waste cards that should be drawn fanned out (draw-3 only).
-    pub fn waste_visible(&self) -> usize {
-        self.board.waste_visible.min(self.board.waste.len())
-    }
-
-    pub fn pile(&self, id: PileId) -> &[Card] {
-        let b = &self.board;
-        match id {
-            PileId::Stock => &b.stock,
-            PileId::Waste => &b.waste,
-            PileId::Foundation(i) => &b.foundations[i],
-            PileId::Tableau(i) => &b.tableau[i],
-        }
     }
 
     fn pile_mut(&mut self, id: PileId) -> &mut Vec<Card> {
@@ -126,42 +72,119 @@ impl Klondike {
             PileId::Waste => &mut b.waste,
             PileId::Foundation(i) => &mut b.foundations[i],
             PileId::Tableau(i) => &mut b.tableau[i],
+            PileId::Cell(_) => unreachable!("Klondike has no cells"),
         }
     }
 
-    pub fn is_won(&self) -> bool {
-        self.board.foundations.iter().all(|f| f.len() == 13)
-    }
-
-    pub fn can_undo(&self) -> bool {
-        !self.history.is_empty()
-    }
-
-    fn checkpoint(&mut self, automatic: bool) {
-        self.history.push(Snapshot { board: self.board.clone(), automatic });
-    }
-
-    /// Reverts the last player action along with any automatic moves that
-    /// followed it.
-    pub fn undo(&mut self) -> bool {
-        let mut undone = false;
-        while let Some(snap) = self.history.pop() {
-            self.board = snap.board;
-            undone = true;
-            if !snap.automatic {
-                break;
-            }
+    fn apply_move(&mut self, from: PileId, count: usize, to: PileId, automatic: bool) -> bool {
+        if !self.can_move(from, count, to) {
+            return false;
         }
-        undone
+        self.history.push(&self.board, automatic);
+
+        let src = self.pile_mut(from);
+        let moving = src.split_off(src.len() - count);
+        if let Some(top) = src.last_mut() {
+            top.face_up = true;
+        }
+        self.pile_mut(to).extend(moving);
+
+        if from == PileId::Waste {
+            self.board.waste_visible = self.board.waste_visible.saturating_sub(1).max(1);
+        }
+        self.board.moves += 1;
+        true
     }
 
-    /// Click on the stock: deal to the waste, or recycle the waste when the
-    /// stock is empty. Returns false if both are empty.
-    pub fn draw(&mut self) -> bool {
+    fn foundation_for(&self, from: PileId) -> Option<PileId> {
+        foundations().find(|&to| self.can_move(from, 1, to))
+    }
+
+    fn fits_a_foundation(&self, card: Card) -> bool {
+        self.board
+            .foundations
+            .iter()
+            .any(|f| rules::fits_foundation(card, f))
+    }
+}
+
+impl Game for Klondike {
+    fn variant(&self) -> Variant {
+        Variant::Klondike(self.draw_mode)
+    }
+
+    fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    fn moves(&self) -> u32 {
+        self.board.moves
+    }
+
+    fn piles(&self) -> Vec<PileId> {
+        [PileId::Stock, PileId::Waste]
+            .into_iter()
+            .chain(foundations())
+            .chain(tableaus())
+            .collect()
+    }
+
+    fn pile(&self, id: PileId) -> &[Card] {
+        let b = &self.board;
+        match id {
+            PileId::Stock => &b.stock,
+            PileId::Waste => &b.waste,
+            PileId::Foundation(i) => &b.foundations[i],
+            PileId::Tableau(i) => &b.tableau[i],
+            PileId::Cell(_) => &[],
+        }
+    }
+
+    fn waste_fan(&self) -> usize {
+        self.board.waste_visible.min(self.board.waste.len())
+    }
+
+    fn can_pick_up(&self, from: PileId, count: usize) -> bool {
+        let src = self.pile(from);
+        if count == 0 || count > src.len() {
+            return false;
+        }
+        match from {
+            PileId::Stock | PileId::Cell(_) => false,
+            PileId::Waste | PileId::Foundation(_) => count == 1,
+            // Face-up runs are always built legally, but checking keeps the
+            // engine honest if a state ever gets constructed some other way.
+            PileId::Tableau(_) => rules::is_alternating_run(&src[src.len() - count..]),
+        }
+    }
+
+    fn can_move(&self, from: PileId, count: usize, to: PileId) -> bool {
+        if from == to || !self.can_pick_up(from, count) {
+            return false;
+        }
+        let src = self.pile(from);
+        let first = src[src.len() - count];
+        let dst = self.pile(to);
+        match to {
+            PileId::Foundation(_) => count == 1 && rules::fits_foundation(first, dst),
+            PileId::Tableau(_) => match dst.last() {
+                None => first.rank == 13,
+                Some(&top) => rules::builds_alternating(first, top),
+            },
+            _ => false,
+        }
+    }
+
+    fn move_cards(&mut self, from: PileId, count: usize, to: PileId) -> bool {
+        self.apply_move(from, count, to, false)
+    }
+
+    /// Deal to the waste, or recycle the waste when the stock is empty.
+    fn click_stock(&mut self) -> bool {
         if self.board.stock.is_empty() && self.board.waste.is_empty() {
             return false;
         }
-        self.checkpoint(false);
+        self.history.push(&self.board, false);
         let b = &mut self.board;
         if b.stock.is_empty() {
             while let Some(mut c) = b.waste.pop() {
@@ -182,91 +205,16 @@ impl Klondike {
         true
     }
 
-    /// Whether the top `count` cards of `from` can be moved onto `to`.
-    pub fn can_move(&self, from: PileId, count: usize, to: PileId) -> bool {
-        let src = self.pile(from);
-        if from == to || count == 0 || count > src.len() {
-            return false;
-        }
-        let moving = &src[src.len() - count..];
-        if !moving.iter().all(|c| c.face_up) {
-            return false;
-        }
-        match from {
-            PileId::Stock => return false,
-            PileId::Waste | PileId::Foundation(_) if count != 1 => return false,
-            _ => {}
-        }
-        // Face-up runs are always built legally, but checking keeps the engine
-        // honest if a state ever gets constructed some other way.
-        let is_run = moving
-            .windows(2)
-            .all(|w| w[0].color() != w[1].color() && w[0].rank == w[1].rank + 1);
-        if !is_run {
-            return false;
-        }
-
-        let first = moving[0];
-        let dst = self.pile(to);
-        match to {
-            PileId::Stock | PileId::Waste => false,
-            PileId::Foundation(_) => {
-                count == 1
-                    && match dst.last() {
-                        None => first.rank == 1,
-                        Some(top) => top.suit == first.suit && first.rank == top.rank + 1,
-                    }
-            }
-            PileId::Tableau(_) => match dst.last() {
-                None => first.rank == 13,
-                Some(top) => {
-                    top.face_up && top.color() != first.color() && first.rank + 1 == top.rank
-                }
-            },
-        }
+    fn can_undo(&self) -> bool {
+        self.history.can_undo()
     }
 
-    /// A player move.
-    pub fn move_cards(&mut self, from: PileId, count: usize, to: PileId) -> bool {
-        self.apply_move(from, count, to, false)
+    fn undo(&mut self) -> bool {
+        self.history.undo(&mut self.board)
     }
 
-    fn apply_move(&mut self, from: PileId, count: usize, to: PileId, automatic: bool) -> bool {
-        if !self.can_move(from, count, to) {
-            return false;
-        }
-        self.checkpoint(automatic);
-
-        let src = self.pile_mut(from);
-        let moving = src.split_off(src.len() - count);
-        if let Some(top) = src.last_mut() {
-            top.face_up = true;
-        }
-        self.pile_mut(to).extend(moving);
-
-        if from == PileId::Waste {
-            self.board.waste_visible = self.board.waste_visible.saturating_sub(1).max(1);
-        }
-        self.board.moves += 1;
-        true
-    }
-
-    /// Best destination for a quick move (double-click): a foundation first,
-    /// then a non-empty tableau, then an empty one.
-    pub fn auto_target(&self, from: PileId, count: usize) -> Option<PileId> {
-        let foundations = (0..PileId::FOUNDATIONS).map(PileId::Foundation);
-        let tableaus = (0..PileId::TABLEAUS).map(PileId::Tableau);
-        let (filled, empty): (Vec<_>, Vec<_>) =
-            tableaus.partition(|&t| !self.pile(t).is_empty());
-        foundations
-            .chain(filled)
-            .chain(empty)
-            .find(|&to| self.can_move(from, count, to))
-    }
-
-    /// True once every card is face up and the stock and waste are empty, so the
-    /// game can be finished mechanically.
-    pub fn can_autocomplete(&self) -> bool {
+    /// Every card is face up and the stock and waste are empty.
+    fn can_autocomplete(&self) -> bool {
         let b = &self.board;
         !self.is_won()
             && b.stock.is_empty()
@@ -274,57 +222,27 @@ impl Klondike {
             && b.tableau.iter().flatten().all(|c| c.face_up)
     }
 
-    /// Moves the lowest-ranked card that fits onto a foundation. Returns false
-    /// when nothing can move.
-    pub fn autocomplete_step(&mut self) -> bool {
-        let candidates = std::iter::once(PileId::Waste)
-            .chain((0..PileId::TABLEAUS).map(PileId::Tableau))
-            .filter_map(|from| self.pile(from).last().map(|c| (c.rank, from)));
-        let mut sorted: Vec<_> = candidates.collect();
-        sorted.sort_by_key(|&(rank, _)| rank);
-        for (_, from) in sorted {
-            if let Some(to) = (0..PileId::FOUNDATIONS)
-                .map(PileId::Foundation)
-                .find(|&to| self.can_move(from, 1, to))
-            {
+    /// Moves the lowest-ranked card that fits onto a foundation.
+    fn autocomplete_step(&mut self) -> bool {
+        let mut candidates: Vec<_> = std::iter::once(PileId::Waste)
+            .chain(tableaus())
+            .filter_map(|from| self.pile(from).last().map(|c| (c.rank, from)))
+            .collect();
+        candidates.sort_by_key(|&(rank, _)| rank);
+        for (_, from) in candidates {
+            if let Some(to) = self.foundation_for(from) {
                 return self.apply_move(from, 1, to, true);
             }
         }
         false
     }
 
-    fn foundation_for(&self, from: PileId) -> Option<PileId> {
-        (0..PileId::FOUNDATIONS)
-            .map(PileId::Foundation)
-            .find(|&to| self.can_move(from, 1, to))
-    }
-
-    /// Whether a card can go to its foundation without ever being needed in the
-    /// tableau again: both cards that could be built on it (next rank down,
-    /// opposite colour) are already on foundations.
-    fn is_safe_for_foundation(&self, card: Card) -> bool {
-        if card.rank <= 2 {
-            return true;
-        }
-        let opposite: Vec<_> = self
-            .board
-            .foundations
-            .iter()
-            .filter(|f| f.first().is_some_and(|c| c.color() != card.color()))
-            .collect();
-        opposite.len() == 2 && opposite.iter().all(|f| f.len() as u8 >= card.rank - 1)
-    }
-
-    /// Makes one safe move to a foundation, as an automatic move. Returns false
-    /// when there is none.
-    pub fn auto_move_step(&mut self) -> bool {
-        let sources =
-            std::iter::once(PileId::Waste).chain((0..PileId::TABLEAUS).map(PileId::Tableau));
-        for from in sources {
+    fn auto_move_step(&mut self) -> bool {
+        for from in std::iter::once(PileId::Waste).chain(tableaus()) {
             let Some(&card) = self.pile(from).last() else {
                 continue;
             };
-            if !self.is_safe_for_foundation(card) {
+            if !rules::is_safe_for_foundation(card, &self.board.foundations) {
                 continue;
             }
             if let Some(to) = self.foundation_for(from) {
@@ -334,13 +252,13 @@ impl Klondike {
         false
     }
 
-    /// Useful moves, best first, ending with [`Hint::Draw`] while the stock or
-    /// waste can still be cycled. Moves that only shuffle cards around, like a
-    /// run between columns that reveals nothing, are left out.
-    pub fn hints(&self) -> Vec<Hint> {
-        let tableaus = || (0..PileId::TABLEAUS).map(PileId::Tableau);
+    /// Useful moves, best first, ending with [`Hint::Stock`] while the stock
+    /// or waste can still be cycled. Moves that only shuffle cards around, like
+    /// a run between columns that reveals nothing, are left out.
+    fn hints(&self) -> Vec<Hint> {
         let mut scored: Vec<(u32, Hint)> = Vec::new();
-        let mut push = |score, from, count, to| scored.push((score, Hint::Move { from, count, to }));
+        let mut push =
+            |score, from, count, to| scored.push((score, Hint::Move { from, count, to }));
 
         if !self.board.waste.is_empty() {
             if let Some(to) = self.foundation_for(PileId::Waste) {
@@ -389,16 +307,13 @@ impl Klondike {
         scored.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
         let mut hints: Vec<Hint> = scored.into_iter().map(|(_, h)| h).collect();
         if !self.board.stock.is_empty() || !self.board.waste.is_empty() {
-            hints.push(Hint::Draw);
+            hints.push(Hint::Stock);
         }
         hints
     }
 
-    fn fits_a_foundation(&self, card: Card) -> bool {
-        self.board.foundations.iter().any(|f| match f.last() {
-            None => card.rank == 1,
-            Some(top) => top.suit == card.suit && card.rank == top.rank + 1,
-        })
+    fn is_won(&self) -> bool {
+        self.board.foundations.iter().all(|f| f.len() == 13)
     }
 }
 
@@ -408,7 +323,7 @@ mod tests {
     use crate::card::Suit;
 
     fn up(rank: u8, suit: Suit) -> Card {
-        Card { rank, suit, face_up: true }
+        Card::new(rank, suit).turned_up()
     }
 
     fn empty_game() -> Klondike {
@@ -451,21 +366,28 @@ mod tests {
     #[test]
     fn draw_three_and_recycle() {
         let mut g = Klondike::new(3, DrawMode::Three);
-        assert!(g.draw());
+        assert!(g.click_stock());
         assert_eq!(g.pile(PileId::Waste).len(), 3);
-        assert_eq!(g.waste_visible(), 3);
+        assert_eq!(g.waste_fan(), 3);
         // 24 cards in stock: 8 draws empties it.
         for _ in 0..7 {
-            g.draw();
+            g.click_stock();
         }
         assert!(g.pile(PileId::Stock).is_empty());
-        let waste_before: Vec<_> = g.pile(PileId::Waste).iter().map(|c| (c.rank, c.suit)).collect();
-        assert!(g.draw()); // recycle
+        let waste_before: Vec<_> = g
+            .pile(PileId::Waste)
+            .iter()
+            .map(|c| (c.rank, c.suit))
+            .collect();
+        assert!(g.click_stock()); // recycle
         assert!(g.pile(PileId::Waste).is_empty());
         let stock = g.pile(PileId::Stock);
         assert!(stock.iter().all(|c| !c.face_up));
         // Top of the stock is the bottom of the old waste.
-        assert_eq!((stock.last().unwrap().rank, stock.last().unwrap().suit), waste_before[0]);
+        assert_eq!(
+            (stock.last().unwrap().rank, stock.last().unwrap().suit),
+            waste_before[0]
+        );
     }
 
     #[test]
@@ -476,15 +398,25 @@ mod tests {
         g.board.tableau[2] = vec![up(7, Suit::Clubs)];
         g.board.tableau[3] = vec![up(13, Suit::Diamonds)];
         assert!(g.can_move(PileId::Tableau(1), 1, PileId::Tableau(0)));
-        assert!(!g.can_move(PileId::Tableau(2), 1, PileId::Tableau(0)), "same colour");
-        assert!(!g.can_move(PileId::Tableau(0), 1, PileId::Tableau(4)), "only kings on empty");
+        assert!(
+            !g.can_move(PileId::Tableau(2), 1, PileId::Tableau(0)),
+            "same colour"
+        );
+        assert!(
+            !g.can_move(PileId::Tableau(0), 1, PileId::Tableau(4)),
+            "only kings on empty"
+        );
         assert!(g.can_move(PileId::Tableau(3), 1, PileId::Tableau(4)));
     }
 
     #[test]
     fn move_run_flips_new_top() {
         let mut g = empty_game();
-        g.board.tableau[0] = vec![Card::new(2, Suit::Clubs), up(9, Suit::Hearts), up(8, Suit::Clubs)];
+        g.board.tableau[0] = vec![
+            Card::new(2, Suit::Clubs),
+            up(9, Suit::Hearts),
+            up(8, Suit::Clubs),
+        ];
         g.board.tableau[1] = vec![up(10, Suit::Spades)];
         assert!(g.move_cards(PileId::Tableau(0), 2, PileId::Tableau(1)));
         assert_eq!(g.pile(PileId::Tableau(1)).len(), 3);
@@ -500,7 +432,10 @@ mod tests {
         g.board.tableau[0] = vec![up(2, Suit::Hearts)];
         g.board.tableau[1] = vec![up(1, Suit::Hearts)];
         assert!(!g.can_move(PileId::Tableau(0), 1, PileId::Foundation(0)));
-        assert_eq!(g.auto_target(PileId::Tableau(1), 1), Some(PileId::Foundation(0)));
+        assert_eq!(
+            g.auto_target(PileId::Tableau(1), 1),
+            Some(PileId::Foundation(0))
+        );
         g.move_cards(PileId::Tableau(1), 1, PileId::Foundation(0));
         assert!(g.can_move(PileId::Tableau(0), 1, PileId::Foundation(0)));
         assert!(!g.can_move(PileId::Tableau(0), 1, PileId::Foundation(1)));
@@ -557,7 +492,11 @@ mod tests {
         let hints = g.hints();
         assert_eq!(
             hints[0],
-            Hint::Move { from: PileId::Tableau(3), count: 1, to: PileId::Foundation(0) }
+            Hint::Move {
+                from: PileId::Tableau(3),
+                count: 1,
+                to: PileId::Foundation(0)
+            }
         );
         assert!(hints.contains(&Hint::Move {
             from: PileId::Tableau(0),
@@ -565,7 +504,13 @@ mod tests {
             to: PileId::Tableau(1)
         }));
         // Moving the 9 of diamonds off the 10 of clubs reveals nothing.
-        assert!(!hints.iter().any(|h| matches!(h, Hint::Move { from: PileId::Tableau(2), .. })));
-        assert!(!hints.contains(&Hint::Draw), "stock and waste are empty");
+        assert!(!hints.iter().any(|h| matches!(
+            h,
+            Hint::Move {
+                from: PileId::Tableau(2),
+                ..
+            }
+        )));
+        assert!(!hints.contains(&Hint::Stock), "stock and waste are empty");
     }
 }

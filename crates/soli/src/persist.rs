@@ -4,7 +4,7 @@
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use soli_core::DrawMode;
+use soli_core::{DrawMode, Variant};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -55,6 +55,11 @@ fn save<T: Serialize>(name: &str, value: &T) {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
+    /// Variant key (see [`Variant::key`]).
+    pub variant: Option<String>,
+    /// Pre-variant setting, still read so older settings files keep their
+    /// draw mode.
+    #[serde(skip_serializing)]
     pub draw_three: bool,
     pub auto_move: bool,
     pub card_back: usize,
@@ -66,6 +71,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            variant: None,
             draw_three: false,
             auto_move: true,
             card_back: 0,
@@ -86,8 +92,19 @@ impl Settings {
         save(Self::FILE, self)
     }
 
-    pub fn draw_mode(&self) -> DrawMode {
-        if self.draw_three { DrawMode::Three } else { DrawMode::One }
+    pub fn variant(&self) -> Variant {
+        self.variant
+            .as_deref()
+            .and_then(Variant::from_key)
+            .unwrap_or(if self.draw_three {
+                Variant::Klondike(DrawMode::Three)
+            } else {
+                Variant::Klondike(DrawMode::One)
+            })
+    }
+
+    pub fn set_variant(&mut self, variant: Variant) {
+        self.variant = Some(variant.key().to_owned());
     }
 }
 
@@ -122,19 +139,12 @@ impl ModeStats {
     }
 }
 
-/// Statistics per game mode, keyed by a stable name (see [`mode_key`]) so new
-/// variants can be added without changing the file format.
+/// Statistics per variant, keyed by [`Variant::key`] so new variants can be
+/// added without changing the file format.
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Stats {
     pub modes: BTreeMap<String, ModeStats>,
-}
-
-pub fn mode_key(mode: DrawMode) -> &'static str {
-    match mode {
-        DrawMode::One => "klondike-draw1",
-        DrawMode::Three => "klondike-draw3",
-    }
 }
 
 impl Stats {
@@ -148,12 +158,12 @@ impl Stats {
         save(Self::FILE, self)
     }
 
-    pub fn mode(&self, mode: DrawMode) -> ModeStats {
-        self.modes.get(mode_key(mode)).cloned().unwrap_or_default()
+    pub fn mode(&self, variant: Variant) -> ModeStats {
+        self.modes.get(variant.key()).cloned().unwrap_or_default()
     }
 
-    pub fn mode_mut(&mut self, mode: DrawMode) -> &mut ModeStats {
-        self.modes.entry(mode_key(mode).to_owned()).or_default()
+    pub fn mode_mut(&mut self, variant: Variant) -> &mut ModeStats {
+        self.modes.entry(variant.key().to_owned()).or_default()
     }
 }
 
@@ -179,11 +189,30 @@ mod tests {
     #[test]
     fn stats_round_trip_through_toml() {
         let mut stats = Stats::default();
-        stats.mode_mut(DrawMode::Three).record_win(90, 80);
+        let three = Variant::Klondike(DrawMode::Three);
+        stats.mode_mut(three).record_win(90, 80);
         let text = toml::to_string_pretty(&stats).unwrap();
         let back: Stats = toml::from_str(&text).unwrap();
-        assert_eq!(back.mode(DrawMode::Three), stats.mode(DrawMode::Three));
-        assert_eq!(back.mode(DrawMode::One), ModeStats::default());
+        assert_eq!(back.mode(three), stats.mode(three));
+        assert_eq!(back.mode(Variant::FreeCell), ModeStats::default());
+    }
+
+    #[test]
+    fn legacy_draw_three_setting_picks_variant() {
+        let s: Settings = toml::from_str(
+            "draw_three = true
+",
+        )
+        .unwrap();
+        assert_eq!(s.variant(), Variant::Klondike(DrawMode::Three));
+        let s: Settings = toml::from_str(
+            "draw_three = true
+variant = \"freecell\"
+",
+        )
+        .unwrap();
+        assert_eq!(s.variant(), Variant::FreeCell);
+        assert!(!toml::to_string(&s).unwrap().contains("draw_three"));
     }
 
     #[test]

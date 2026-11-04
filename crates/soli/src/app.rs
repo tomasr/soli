@@ -4,7 +4,7 @@ use crate::persist::{Settings, Stats};
 use crate::render::{self, BACKS, TABLES};
 use crate::ui::{self, format_time};
 use macroquad::prelude::*;
-use soli_core::{Card, DrawMode, Hint, Klondike, PileId};
+use soli_core::{Card, Game, Hint, PileId, Variant};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,6 +12,17 @@ const DOUBLE_CLICK_SECS: f64 = 0.35;
 /// Pace of automatic moves (auto-move and auto-finish).
 const AUTO_STEP_SECS: f32 = 0.08;
 const HINT_SECS: f64 = 2.5;
+/// How long the "can't move this" feedback lingers after the button is let go.
+const BLOCKED_FADE_SECS: f64 = 0.35;
+
+/// Feedback for pressing on a run that can't be picked up as a whole: the
+/// cards from `idx` up are dimmed, except the top `movable` which glow.
+struct Blocked {
+    pile: PileId,
+    idx: usize,
+    movable: usize,
+    released: Option<f64>,
+}
 
 struct Drag {
     from: PileId,
@@ -25,10 +36,11 @@ enum Overlay {
     None,
     Help,
     Stats,
+    Games,
 }
 
 pub struct App {
-    pub game: Klondike,
+    pub game: Box<dyn Game>,
     drag: Option<Drag>,
     anim: Animator,
     animating: bool,
@@ -45,6 +57,7 @@ pub struct App {
     recorded: bool,
     hint: Option<(Hint, f64)>,
     hint_cursor: usize,
+    blocked: Option<Blocked>,
     toast: Option<(String, f64)>,
     overlay: Overlay,
     pub settings: Settings,
@@ -54,7 +67,7 @@ pub struct App {
 }
 
 fn key(card: Card) -> CardKey {
-    (card.rank, card.suit)
+    card.id()
 }
 
 pub fn random_seed() -> u64 {
@@ -65,19 +78,11 @@ pub fn random_seed() -> u64 {
     nanos ^ (nanos >> 29)
 }
 
-fn all_piles() -> impl Iterator<Item = PileId> {
-    [PileId::Stock, PileId::Waste]
-        .into_iter()
-        .chain((0..PileId::FOUNDATIONS).map(PileId::Foundation))
-        .chain((0..PileId::TABLEAUS).map(PileId::Tableau))
-}
-
 impl App {
     pub fn new(settings: Settings, stats: Stats, seed: u64, persist: bool) -> Self {
-        let mode = settings.draw_mode();
         let auto = settings.auto_move;
         App {
-            game: Klondike::new(seed, mode),
+            game: settings.variant().new_game(seed),
             drag: None,
             anim: Animator::default(),
             animating: false,
@@ -90,6 +95,7 @@ impl App {
             recorded: false,
             hint: None,
             hint_cursor: 0,
+            blocked: None,
             toast: None,
             overlay: Overlay::None,
             settings,
@@ -103,30 +109,63 @@ impl App {
     pub fn finish_round(&mut self) {
         if self.played && !self.recorded {
             self.recorded = true;
-            self.stats.mode_mut(self.game.draw_mode()).record_loss();
+            self.stats.mode_mut(self.game.variant()).record_loss();
             if self.persist {
                 self.stats.save();
             }
         }
     }
 
-    fn start_round(&mut self, seed: u64, mode: DrawMode) {
+    fn start_round(&mut self, seed: u64, variant: Variant) {
         self.finish_round();
         let settings = std::mem::take(&mut self.settings);
         let stats = std::mem::take(&mut self.stats);
         let mut next = App::new(settings, stats, seed, self.persist);
-        next.game = Klondike::new(seed, mode);
+        next.game = variant.new_game(seed);
         next.toast = self.toast.take();
         *self = next;
     }
 
-    /// Shows an overlay or hint by name ("help", "stats", "hint"); used by
-    /// screenshot runs.
+    /// Switches to another game, remembering the choice.
+    fn choose_variant(&mut self, variant: Variant) {
+        self.overlay = Overlay::None;
+        self.settings.set_variant(variant);
+        self.save_settings();
+        self.start_round(random_seed(), variant);
+        self.show_toast(variant.name());
+    }
+
+    /// Opens the game chooser, as at startup. The current deal stays behind
+    /// it, so closing the chooser just plays that.
+    pub fn open_game_chooser(&mut self) {
+        self.overlay = Overlay::Games;
+    }
+
+    /// Shows an overlay or hint by name ("help", "stats", "games", "hint",
+    /// "blocked");
+    /// used by screenshot runs.
     pub fn show_overlay(&mut self, name: &str) {
         match name {
             "help" => self.overlay = Overlay::Help,
             "stats" => self.overlay = Overlay::Stats,
+            "games" => self.overlay = Overlay::Games,
             "hint" => self.show_hint(),
+            "blocked" => {
+                // Press on the third card from the top of the first column.
+                let pile = PileId::Tableau(0);
+                let count = 3.min(self.game.pile(pile).len());
+                let idx = self.game.pile(pile).len() - count;
+                let movable = (1..count)
+                    .rev()
+                    .find(|&k| self.game.can_pick_up(pile, k))
+                    .unwrap_or(0);
+                self.blocked = Some(Blocked {
+                    pile,
+                    idx,
+                    movable,
+                    released: None,
+                });
+            }
             _ => {}
         }
     }
@@ -148,7 +187,11 @@ impl App {
             || self.autoplay
             || self.auto_pending
             || self.hint.is_some()
-            || self.toast.as_ref().is_some_and(|(_, t)| get_time() - t < 2.0)
+            || self.blocked.is_some()
+            || self
+                .toast
+                .as_ref()
+                .is_some_and(|(_, t)| get_time() - t < 2.0)
             || is_mouse_button_down(MouseButton::Left)
     }
 
@@ -160,9 +203,9 @@ impl App {
     fn drawn_positions(&self, layout: &Layout, now: f64) -> HashMap<CardKey, Vec2> {
         let mouse: Vec2 = mouse_position().into();
         let mut out = HashMap::with_capacity(52);
-        for pile in all_piles() {
+        for pile in self.game.piles() {
             let cards = self.game.pile(pile);
-            let positions = layout.card_positions(&self.game, pile);
+            let positions = layout.card_positions(self.game.as_ref(), pile);
             let dragged_from = match &self.drag {
                 Some(d) if d.from == pile => cards.len() - d.count,
                 _ => cards.len(),
@@ -183,8 +226,8 @@ impl App {
 
     fn resting_positions(&self, layout: &Layout) -> HashMap<CardKey, Vec2> {
         let mut out = HashMap::with_capacity(52);
-        for pile in all_piles() {
-            let positions = layout.card_positions(&self.game, pile);
+        for pile in self.game.piles() {
+            let positions = layout.card_positions(self.game.as_ref(), pile);
             for (&card, pos) in self.game.pile(pile).iter().zip(positions) {
                 out.insert(key(card), pos);
             }
@@ -207,6 +250,7 @@ impl App {
     fn player_acted(&mut self) {
         self.played = true;
         self.hint = None;
+        self.blocked = None;
         self.hint_cursor = 0;
         self.auto_pending = self.settings.auto_move;
         self.auto_timer = 0.0;
@@ -214,14 +258,20 @@ impl App {
 
     /// The pile and card index under the point, if any.
     fn hit_test(&self, layout: &Layout, p: Vec2) -> Option<(PileId, usize)> {
-        for pile in all_piles() {
+        for pile in self.game.piles() {
             if pile == PileId::Stock {
-                if layout.rect_at(layout.slot(pile)).contains(p) {
+                // The whole stock acts as one button, including Spider's
+                // fanned-out deals.
+                let positions = layout.card_positions(self.game.as_ref(), pile);
+                let hit = std::iter::once(layout.slot(pile))
+                    .chain(positions)
+                    .any(|pos| layout.rect_at(pos).contains(p));
+                if hit {
                     return Some((pile, 0));
                 }
                 continue;
             }
-            let positions = layout.card_positions(&self.game, pile);
+            let positions = layout.card_positions(self.game.as_ref(), pile);
             if let Some(i) = positions
                 .iter()
                 .rposition(|&pos| layout.rect_at(pos).contains(p))
@@ -237,21 +287,30 @@ impl App {
             return;
         };
         if pile == PileId::Stock {
-            if self.animated(layout, |app| app.game.draw()) {
+            if let Some(reason) = self.game.stock_blocked() {
+                self.show_toast(reason);
+            } else if self.animated(layout, |app| app.game.click_stock()) {
                 self.player_acted();
             }
             return;
         }
         let cards = self.game.pile(pile);
-        let len = cards.len();
-        if !cards[idx].face_up {
+        let count = cards.len() - idx;
+        if !self.game.can_pick_up(pile, count) {
+            if cards[idx].face_up {
+                let movable = (1..count)
+                    .rev()
+                    .find(|&k| self.game.can_pick_up(pile, k))
+                    .unwrap_or(0);
+                self.blocked = Some(Blocked {
+                    pile,
+                    idx,
+                    movable,
+                    released: None,
+                });
+            }
             return;
         }
-        // Only the top card can be taken from the waste or a foundation.
-        if matches!(pile, PileId::Waste | PileId::Foundation(_)) && idx != len - 1 {
-            return;
-        }
-        let count = len - idx;
 
         let now = get_time();
         let is_double =
@@ -268,21 +327,24 @@ impl App {
 
         // Grab the card where it is currently drawn, which may be mid-flight.
         let drawn = self.drawn_positions(layout, now)[&key(cards[idx])];
-        self.drag = Some(Drag { from: pile, count, grab: mouse - drawn });
+        self.drag = Some(Drag {
+            from: pile,
+            count,
+            grab: mouse - drawn,
+        });
     }
 
     /// Legal drop target overlapping the dragged cards the most.
     fn drop_target(&self, layout: &Layout, drag: &Drag, mouse: Vec2) -> Option<PileId> {
         let dragged = layout.rect_at(self.drag_origin(drag, mouse));
-        let targets = (0..PileId::FOUNDATIONS)
-            .map(PileId::Foundation)
-            .chain((0..PileId::TABLEAUS).map(PileId::Tableau));
-        targets
+        self.game
+            .piles()
+            .into_iter()
             .filter(|&to| self.game.can_move(drag.from, drag.count, to))
             .filter_map(|to| {
                 // A tableau accepts drops anywhere along the column.
                 let slot = layout.rect_at(layout.slot(to));
-                let area = match layout.card_positions(&self.game, to).last() {
+                let area = match layout.card_positions(self.game.as_ref(), to).last() {
                     Some(&top) if matches!(to, PileId::Tableau(_)) => {
                         let bottom = top.y + layout.card.y;
                         Rect::new(slot.x, slot.y, slot.w, bottom - slot.y)
@@ -331,36 +393,58 @@ impl App {
             self.overlay = Overlay::None;
         }
         if is_key_pressed(KeyCode::F1) {
-            self.overlay = if self.overlay == Overlay::Help { Overlay::None } else { Overlay::Help };
+            self.overlay = if self.overlay == Overlay::Help {
+                Overlay::None
+            } else {
+                Overlay::Help
+            };
         }
         if is_key_pressed(KeyCode::S) {
-            self.overlay = if self.overlay == Overlay::Stats { Overlay::None } else { Overlay::Stats };
+            self.overlay = if self.overlay == Overlay::Stats {
+                Overlay::None
+            } else {
+                Overlay::Stats
+            };
+        }
+        if is_key_pressed(KeyCode::G) {
+            self.overlay = if self.overlay == Overlay::Games {
+                Overlay::None
+            } else {
+                Overlay::Games
+            };
+        }
+        if self.overlay == Overlay::Games {
+            const DIGITS: [KeyCode; 6] = [
+                KeyCode::Key1,
+                KeyCode::Key2,
+                KeyCode::Key3,
+                KeyCode::Key4,
+                KeyCode::Key5,
+                KeyCode::Key6,
+            ];
+            if let Some(i) = DIGITS.iter().position(|&k| is_key_pressed(k)) {
+                self.choose_variant(Variant::ALL[i]);
+            }
         }
         if self.overlay != Overlay::None {
             return;
         }
 
         if is_key_pressed(KeyCode::N) || is_key_pressed(KeyCode::F2) {
-            self.start_round(random_seed(), self.game.draw_mode());
+            self.start_round(random_seed(), self.game.variant());
         }
         if is_key_pressed(KeyCode::R) {
-            self.start_round(self.game.seed(), self.game.draw_mode());
-        }
-        if is_key_pressed(KeyCode::D) {
-            self.settings.draw_three = !self.settings.draw_three;
-            self.save_settings();
-            let mode = self.settings.draw_mode();
-            self.start_round(random_seed(), mode);
-            self.show_toast(match mode {
-                DrawMode::One => "Draw 1",
-                DrawMode::Three => "Draw 3",
-            });
+            self.start_round(self.game.seed(), self.game.variant());
         }
         if is_key_pressed(KeyCode::M) {
             self.settings.auto_move = !self.settings.auto_move;
             self.auto_pending = self.settings.auto_move;
             self.save_settings();
-            self.show_toast(if self.settings.auto_move { "Auto-move on" } else { "Auto-move off" });
+            self.show_toast(if self.settings.auto_move {
+                "Auto-move on"
+            } else {
+                "Auto-move off"
+            });
         }
         if is_key_pressed(KeyCode::T) {
             self.settings.table = (self.settings.table + 1) % TABLES.len();
@@ -370,7 +454,10 @@ impl App {
         if is_key_pressed(KeyCode::B) {
             self.settings.card_back = (self.settings.card_back + 1) % BACKS.len();
             self.save_settings();
-            self.show_toast(format!("Card back: {}", BACKS[self.settings.card_back].name));
+            self.show_toast(format!(
+                "Card back: {}",
+                BACKS[self.settings.card_back].name
+            ));
         }
         if is_key_pressed(KeyCode::H) && !self.game.is_won() {
             self.show_hint();
@@ -382,6 +469,7 @@ impl App {
                 // Don't immediately redo the automatic moves just undone.
                 app.auto_pending = false;
                 app.hint = None;
+                app.blocked = None;
                 app.game.undo();
             });
         }
@@ -398,7 +486,13 @@ impl App {
 
         if self.overlay != Overlay::None {
             if is_mouse_button_pressed(MouseButton::Left) {
-                self.overlay = Overlay::None;
+                let picked = (self.overlay == Overlay::Games)
+                    .then(|| games_menu().1.iter().position(|r| r.contains(mouse)))
+                    .flatten();
+                match picked {
+                    Some(i) => self.choose_variant(Variant::ALL[i]),
+                    None => self.overlay = Overlay::None,
+                }
             }
         } else if !self.autoplay {
             if is_mouse_button_pressed(MouseButton::Left) {
@@ -436,7 +530,9 @@ impl App {
         if self.game.is_won() && !self.recorded {
             self.recorded = true;
             let (secs, moves) = (self.elapsed as u32, self.game.moves());
-            self.stats.mode_mut(self.game.draw_mode()).record_win(secs, moves);
+            self.stats
+                .mode_mut(self.game.variant())
+                .record_win(secs, moves);
             if self.persist {
                 self.stats.save();
             }
@@ -445,6 +541,14 @@ impl App {
         self.animating = self.anim.update(now);
         if self.hint.is_some_and(|(_, t)| now - t > HINT_SECS) {
             self.hint = None;
+        }
+        if let Some(b) = &mut self.blocked {
+            if !is_mouse_button_down(MouseButton::Left) && b.released.is_none() {
+                b.released = Some(now);
+            }
+            if b.released.is_some_and(|t| now - t > BLOCKED_FADE_SECS) {
+                self.blocked = None;
+            }
         }
         if self.played && !self.game.is_won() {
             self.elapsed += get_frame_time();
@@ -472,27 +576,31 @@ impl App {
                 .unwrap_or_else(|| layout.rect_at(layout.slot(pile)))
         };
 
-        for pile in all_piles() {
+        for pile in self.game.piles() {
             let slot = layout.rect_at(layout.slot(pile));
-            let label = match pile {
-                PileId::Foundation(_) => Some("A"),
-                PileId::Tableau(_) => Some("K"),
-                PileId::Stock | PileId::Waste => None,
-            };
+            let label = slot_label(self.game.variant(), pile);
             render::draw_slot(slot, label, table);
-            if pile == PileId::Stock && !self.game.pile(PileId::Waste).is_empty() {
+            let klondike = matches!(self.game.variant(), Variant::Klondike(_));
+            if pile == PileId::Stock && klondike && !self.game.pile(PileId::Waste).is_empty() {
                 render::draw_recycle_mark(slot, table);
             }
         }
 
         // Highlights sit between the slots and the cards, so they read as a
         // glow around the cards.
-        if let Some(target) = self.drag.as_ref().and_then(|d| self.drop_target(layout, d, mouse)) {
+        if let Some(target) = self
+            .drag
+            .as_ref()
+            .and_then(|d| self.drop_target(layout, d, mouse))
+        {
             render::draw_outline(top_rect(target), render::HIGHLIGHT);
         }
         if let Some((hint, shown)) = self.hint {
             let pulse = 0.65 + 0.35 * ((now - shown) * 6.0).cos() as f32;
-            let color = Color { a: pulse, ..render::HINT };
+            let color = Color {
+                a: pulse,
+                ..render::HINT
+            };
             match hint {
                 Hint::Move { from, count, to } => {
                     let cards = self.game.pile(from);
@@ -503,13 +611,40 @@ impl App {
                     render::draw_outline(span, color);
                     render::draw_outline(top_rect(to), color);
                 }
-                Hint::Draw => render::draw_outline(top_rect(PileId::Stock), color),
+                Hint::Stock => render::draw_outline(top_rect(PileId::Stock), color),
             }
+        }
+        // The part of a blocked run that could move glows like a hint; the
+        // rest is dimmed once the cards are drawn.
+        let blocked = self.blocked.as_ref().and_then(|b| {
+            let cards = self.game.pile(b.pile);
+            let fade = b
+                .released
+                .map_or(1.0, |t| 1.0 - ((now - t) / BLOCKED_FADE_SECS) as f32);
+            (b.idx < cards.len() && b.movable < cards.len() - b.idx).then_some((
+                b,
+                cards,
+                fade.max(0.0),
+            ))
+        });
+        if let Some((b, cards, fade)) = blocked
+            && b.movable > 0
+        {
+            let first = rect(cards[cards.len() - b.movable]);
+            let last = rect(cards[cards.len() - 1]);
+            let span = Rect::new(first.x, first.y, first.w, last.y + last.h - first.y);
+            render::draw_outline(
+                span,
+                Color {
+                    a: fade,
+                    ..render::HINT
+                },
+            );
         }
 
         // Cards in flight are drawn after every pile so they pass over them.
         let mut flying = Vec::new();
-        for pile in all_piles() {
+        for pile in self.game.piles() {
             let cards = self.game.pile(pile);
             let visible = &cards[..cards.len() - hidden(pile)];
             let (resting, moving): (Vec<_>, Vec<_>) =
@@ -517,7 +652,11 @@ impl App {
             flying.extend(moving);
             // Stacked piles only need their top two resting cards drawn.
             let skip = match pile {
-                PileId::Stock | PileId::Foundation(_) => resting.len().saturating_sub(2),
+                PileId::Foundation(_) | PileId::Cell(_) => resting.len().saturating_sub(2),
+                // Spider's stock is fanned by deal, so every card shows.
+                PileId::Stock if matches!(self.game.variant(), Variant::Klondike(_)) => {
+                    resting.len().saturating_sub(2)
+                }
                 _ => 0,
             };
             for &card in &resting[skip..] {
@@ -533,6 +672,22 @@ impl App {
                 render::draw_card(card, rect(card), back);
             }
         }
+        if let Some((b, cards, fade)) = blocked {
+            // One shade over the exposed part of the stuck cards: from the
+            // first of them down to where the movable part starts (or the
+            // bottom of the last card, if none can move).
+            let first = rect(cards[b.idx]);
+            let bottom = match b.movable {
+                0 => rect(cards[cards.len() - 1]).bottom(),
+                n => rect(cards[cards.len() - n]).y,
+            };
+            let shade = Rect::new(first.x, first.y, first.w, bottom - first.y);
+            render::rounded_rect(
+                shade,
+                first.w * 0.08,
+                Color::new(0.0, 0.0, 0.0, 0.45 * fade),
+            );
+        }
 
         self.draw_status(layout);
         if let Some((text, shown)) = &self.toast {
@@ -545,6 +700,7 @@ impl App {
             Overlay::None => {}
             Overlay::Help => draw_help(),
             Overlay::Stats => self.draw_stats(),
+            Overlay::Games => self.draw_games(),
         }
     }
 
@@ -558,22 +714,19 @@ impl App {
         let baseline = y + (h + render::measure("M", size).offset_y) / 2.0;
         let pad = 12.0;
 
-        let mode = match self.game.draw_mode() {
-            DrawMode::One => "Draw 1",
-            DrawMode::Three => "Draw 3",
-        };
         let left = format!(
-            "{mode}     Moves {}     Time {}     Deal #{}",
+            "{}     Moves {}     Time {}     Deal #{}",
+            self.game.variant().name(),
             self.game.moves(),
             format_time(self.elapsed as u32),
-            self.game.seed() % 1_000_000
+            self.game.deal_number()
         );
         render::text(&left, pad, baseline, size, WHITE);
 
         let right = if self.game.can_autocomplete() && !self.autoplay {
             "A  auto-finish"
         } else {
-            "H  hint     S  stats     F1  help"
+            "G  game     H  hint     S  stats     F1  help"
         };
         ui::right_text(right, sw - pad, baseline, size, WHITE);
     }
@@ -582,61 +735,139 @@ impl App {
         let r = ui::panel(480.0, 150.0);
         let cx = r.x + r.w / 2.0;
         ui::centered_text("You won!", cx, r.y + 56.0, 40.0, WHITE);
-        let stats = self.stats.mode(self.game.draw_mode());
+        let stats = self.stats.mode(self.game.variant());
         let secs = self.elapsed as u32;
         let record = if stats.best_time_secs == Some(secs) && stats.won > 1 {
             "  New best time!"
         } else {
             ""
         };
-        let sub = format!("{} moves in {}.{record}", self.game.moves(), format_time(secs));
+        let sub = format!(
+            "{} moves in {}.{record}",
+            self.game.moves(),
+            format_time(secs)
+        );
         ui::centered_text(&sub, cx, r.y + 94.0, 18.0, WHITE);
         ui::centered_text("N  new game     S  stats", cx, r.y + 126.0, 15.0, ui::DIM);
     }
 
     fn draw_stats(&self) {
-        let r = ui::panel(460.0, 360.0);
+        let r = ui::panel(760.0, 160.0 + Variant::ALL.len() as f32 * 34.0);
         let cx = r.x + r.w / 2.0;
         ui::centered_text("Statistics", cx, r.y + 44.0, 26.0, WHITE);
 
-        let current = self.game.draw_mode();
-        let modes = [DrawMode::One, DrawMode::Three];
-        let cols = [r.x + r.w * 0.68, r.x + r.w * 0.9];
-        let size = 16.0;
-        let mut y = r.y + 86.0;
-        for (i, mode) in modes.iter().enumerate() {
-            let label = if *mode == DrawMode::One { "Draw 1" } else { "Draw 3" };
-            let color = if *mode == current { ui::ACCENT } else { ui::DIM };
-            ui::right_text(label, cols[i], y, size, color);
-        }
-        y += 34.0;
-
-        let all: Vec<_> = modes.iter().map(|&m| self.stats.mode(m)).collect();
-        let none = || "–".to_owned();
-        type Row = (&'static str, fn(&crate::persist::ModeStats) -> Option<String>);
-        let rows: [Row; 7] = [
+        let size = 15.0;
+        type Column = (
+            &'static str,
+            fn(&crate::persist::ModeStats) -> Option<String>,
+        );
+        let columns: [Column; 6] = [
             ("Played", |s| Some(s.played.to_string())),
             ("Won", |s| Some(s.won.to_string())),
-            ("Win rate", |s| s.win_rate().map(|r| format!("{:.0}%", r * 100.0))),
-            ("Current streak", |s| Some(s.current_streak.to_string())),
-            ("Best streak", |s| Some(s.best_streak.to_string())),
+            ("Win %", |s| {
+                s.win_rate().map(|r| format!("{:.0}%", r * 100.0))
+            }),
+            ("Streak", |s| {
+                Some(format!("{} / {}", s.current_streak, s.best_streak))
+            }),
             ("Best time", |s| s.best_time_secs.map(format_time)),
-            ("Fewest moves", |s| s.fewest_moves.map(|m| m.to_string())),
+            ("Fewest", |s| s.fewest_moves.map(|m| m.to_string())),
         ];
-        for (label, value) in rows {
-            render::text(label, r.x + 36.0, y, size, WHITE);
-            for (i, s) in all.iter().enumerate() {
-                ui::right_text(&value(s).unwrap_or_else(none), cols[i], y, size, WHITE);
-            }
-            y += 30.0;
+        let first_col = r.x + 200.0;
+        let col_w = (r.x + r.w - 32.0 - first_col) / columns.len() as f32;
+        let col_right = |i: usize| first_col + (i + 1) as f32 * col_w;
+
+        let mut y = r.y + 92.0;
+        for (i, (label, _)) in columns.iter().enumerate() {
+            ui::right_text(label, col_right(i), y, size, ui::DIM);
         }
-        ui::centered_text("Abandoned games count as losses", cx, r.y + r.h - 20.0, 13.0, ui::DIM);
+        y += 36.0;
+
+        let current = self.game.variant();
+        for variant in Variant::ALL {
+            let stats = self.stats.mode(variant);
+            let color = if variant == current {
+                ui::ACCENT
+            } else {
+                WHITE
+            };
+            render::text(variant.name(), r.x + 32.0, y, size, color);
+            for (i, (_, value)) in columns.iter().enumerate() {
+                let text = value(&stats).unwrap_or_else(|| "–".to_owned());
+                ui::right_text(&text, col_right(i), y, size, color);
+            }
+            y += 34.0;
+        }
+        ui::centered_text(
+            "Streak is current / best. Abandoned games count as losses.",
+            cx,
+            r.y + r.h - 20.0,
+            13.0,
+            ui::DIM,
+        );
+    }
+
+    fn draw_games(&self) {
+        let (panel, rows) = games_menu();
+        let r = ui::panel(panel.w, panel.h);
+        let cx = r.x + r.w / 2.0;
+        ui::centered_text("Choose a game", cx, r.y + 44.0, 26.0, WHITE);
+        let mouse: Vec2 = mouse_position().into();
+        let current = self.game.variant();
+        for (i, (variant, row)) in Variant::ALL.iter().zip(&rows).enumerate() {
+            if row.contains(mouse) {
+                render::rounded_rect(*row, 8.0, Color::new(1.0, 1.0, 1.0, 0.08));
+            }
+            let baseline = row.y + (row.h + render::measure("M", 17.0).offset_y) / 2.0;
+            let color = if *variant == current {
+                ui::ACCENT
+            } else {
+                WHITE
+            };
+            render::text(&(i + 1).to_string(), row.x + 16.0, baseline, 17.0, ui::DIM);
+            render::text(variant.name(), row.x + 52.0, baseline, 17.0, color);
+            let stats = self.stats.mode(*variant);
+            let summary = match stats.win_rate() {
+                Some(rate) => format!("{} played · {:.0}% won", stats.played, rate * 100.0),
+                None => "not played yet".to_owned(),
+            };
+            ui::right_text(&summary, row.x + row.w - 16.0, baseline, 14.0, ui::DIM);
+        }
+        let footer = "Number key or click to start a new game  ·  Esc to keep this deal";
+        ui::centered_text(footer, cx, r.y + r.h - 20.0, 13.0, ui::DIM);
+    }
+}
+
+/// Panel and row rectangles of the game chooser, shared by drawing and
+/// clicking.
+fn games_menu() -> (Rect, Vec<Rect>) {
+    let row_h = 44.0;
+    let (w, h) = (540.0f32, 110.0 + Variant::ALL.len() as f32 * row_h);
+    let (sw, sh) = (screen_width(), screen_height());
+    let (w, h) = (w.min(sw), h.min(sh));
+    let panel = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
+    let rows = (0..Variant::ALL.len())
+        .map(|i| {
+            let y = panel.y + 66.0 + i as f32 * row_h;
+            Rect::new(panel.x + 20.0, y, panel.w - 40.0, row_h - 4.0)
+        })
+        .collect();
+    (panel, rows)
+}
+
+/// Placeholder letter shown in an empty pile, where the variant has a rule
+/// about what may start it.
+fn slot_label(variant: Variant, pile: PileId) -> Option<&'static str> {
+    match (variant, pile) {
+        (Variant::Klondike(_) | Variant::FreeCell, PileId::Foundation(_)) => Some("A"),
+        (Variant::Klondike(_), PileId::Tableau(_)) => Some("K"),
+        _ => None,
     }
 }
 
 fn draw_help() {
     let entries: [(&str, &str); 13] = [
-        ("Click stock", "Draw / recycle waste"),
+        ("Click stock", "Draw, recycle or deal"),
         ("Drag", "Move a card or run"),
         ("Double-click", "Send card to best spot"),
         ("H", "Hint (repeat for more)"),
@@ -644,7 +875,7 @@ fn draw_help() {
         ("A", "Auto-finish when possible"),
         ("M", "Toggle auto-move to foundations"),
         ("N  /  R", "New game  /  Restart deal"),
-        ("D", "Switch draw 1 / draw 3"),
+        ("G", "Choose game"),
         ("T", "Change table colour"),
         ("B", "Change card back"),
         ("S", "Statistics"),

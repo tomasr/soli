@@ -6,8 +6,8 @@ use macroquad::prelude::*;
 use soli_core::Suit;
 use std::collections::HashMap;
 
-/// A card's identity. Each rank/suit pair is unique within a deck.
-pub type CardKey = (u8, Suit);
+/// A card's identity (rank, suit, copy), unique even in multi-deck games.
+pub type CardKey = (u8, Suit, u8);
 
 const DURATION: f64 = 0.16;
 

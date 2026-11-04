@@ -14,7 +14,7 @@ use layout::Layout;
 use macroquad::miniquad::conf::Platform;
 use macroquad::prelude::*;
 use persist::{Settings, Stats};
-use soli_core::{Card, Suit};
+use soli_core::{Card, DrawMode, Suit, Variant};
 use std::time::{Duration, Instant};
 
 /// Frame pacing. VSync is off (DWM composites windowed apps, so there is no
@@ -31,8 +31,8 @@ const WINDOW_SIZE: (f32, f32) = (1100.0, 760.0);
 
 enum Mode {
     Play,
-    /// Render a fixed deal to a PNG and exit (`--show help|stats|hint` adds
-    /// an overlay).
+    /// Render a fixed deal to a PNG and exit. `--variant <key>` picks the
+    /// game; `--show help|stats|games|hint` adds an overlay.
     Screenshot(String),
     /// Render every card face and back to a PNG and exit.
     Gallery(String),
@@ -56,7 +56,9 @@ fn mode_from_args() -> Mode {
 
 fn saved_window() -> Option<(u32, u32)> {
     match mode_from_args() {
-        Mode::Play => Settings::load().window.filter(|&(w, h)| w >= 400 && h >= 300),
+        Mode::Play => Settings::load()
+            .window
+            .filter(|&(w, h)| w >= 400 && h >= 300),
         _ => None,
     }
 }
@@ -87,14 +89,14 @@ fn draw_gallery() {
     let h = w * 1.4;
     for (row, suit) in Suit::ALL.iter().enumerate() {
         for rank in 1..=13u8 {
-            let card = Card { rank, suit: *suit, face_up: true };
+            let card = Card::new(rank, *suit).turned_up();
             let x = gap + (rank - 1) as f32 * (w + gap);
             let y = gap + row as f32 * (h + gap);
             render::draw_card(card, Rect::new(x, y, w, h), &render::BACKS[0]);
         }
     }
     for (i, back) in render::BACKS.iter().enumerate() {
-        let card = Card { rank: 1, suit: Suit::Spades, face_up: false };
+        let card = Card::new(1, Suit::Spades);
         let x = gap + i as f32 * (w + gap);
         let y = gap + 4.0 * (h + gap);
         render::draw_card(card, Rect::new(x, y, w, h), back);
@@ -114,14 +116,35 @@ async fn main() {
     }
 
     let mut app = match mode {
-        Mode::Play => App::new(Settings::load(), Stats::load(), app::random_seed(), true),
+        Mode::Play => {
+            let mut app = App::new(Settings::load(), Stats::load(), app::random_seed(), true);
+            app.open_game_chooser();
+            app
+        }
         _ => {
-            let settings = Settings { draw_three: true, auto_move: false, ..Default::default() };
-            let mut app = App::new(settings, Stats::default(), 12345, false);
-            for _ in 0..3 {
-                app.game.draw();
-            }
             let args: Vec<String> = std::env::args().collect();
+            let value_of = |flag: &str| {
+                let i = args.iter().position(|a| a == flag)?;
+                args.get(i + 1).map(|s| s.as_str())
+            };
+            let variant = value_of("--variant")
+                .and_then(Variant::from_key)
+                .unwrap_or(Variant::Klondike(DrawMode::Three));
+            let mut settings = Settings {
+                auto_move: false,
+                ..Default::default()
+            };
+            settings.set_variant(variant);
+            let mut app = App::new(settings, Stats::default(), 12345, false);
+            // A few stock clicks so the waste (or a Spider deal) shows.
+            let clicks = if matches!(variant, Variant::Klondike(_)) {
+                3
+            } else {
+                0
+            };
+            for _ in 0..clicks {
+                app.game.click_stock();
+            }
             if let Some(i) = args.iter().position(|a| a == "--show") {
                 app.show_overlay(args.get(i + 1).map_or("", |s| s.as_str()));
             }
@@ -136,7 +159,7 @@ async fn main() {
     let mut frames = 0;
     loop {
         let frame_start = Instant::now();
-        let layout = Layout::compute(screen_width(), screen_height());
+        let layout = Layout::compute(screen_width(), screen_height(), app.game.variant());
         match &mode {
             Mode::Play => {
                 app.update(&layout);
