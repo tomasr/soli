@@ -6,4 +6,4 @@ pub mod klondike;
 pub mod rng;
 
 pub use card::{Card, Color, Suit};
-pub use klondike::{DrawMode, Klondike, PileId};
+pub use klondike::{DrawMode, Hint, Klondike, PileId};

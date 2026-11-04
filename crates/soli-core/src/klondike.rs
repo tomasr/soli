@@ -16,6 +16,13 @@ impl DrawMode {
     }
 }
 
+/// A suggested next step, as returned by [`Klondike::hints`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hint {
+    Move { from: PileId, count: usize, to: PileId },
+    Draw,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PileId {
     Stock,
@@ -42,9 +49,17 @@ struct Board {
     moves: u32,
 }
 
+/// A board snapshot taken before a move, for undo.
+struct Snapshot {
+    board: Board,
+    /// Made by the game (auto-move, auto-finish) rather than the player. Undo
+    /// rolls these back together with the player move that preceded them.
+    automatic: bool,
+}
+
 pub struct Klondike {
     board: Board,
-    history: Vec<Board>,
+    history: Vec<Snapshot>,
     draw_mode: DrawMode,
     seed: u64,
 }
@@ -122,14 +137,22 @@ impl Klondike {
         !self.history.is_empty()
     }
 
+    fn checkpoint(&mut self, automatic: bool) {
+        self.history.push(Snapshot { board: self.board.clone(), automatic });
+    }
+
+    /// Reverts the last player action along with any automatic moves that
+    /// followed it.
     pub fn undo(&mut self) -> bool {
-        match self.history.pop() {
-            Some(prev) => {
-                self.board = prev;
-                true
+        let mut undone = false;
+        while let Some(snap) = self.history.pop() {
+            self.board = snap.board;
+            undone = true;
+            if !snap.automatic {
+                break;
             }
-            None => false,
         }
+        undone
     }
 
     /// Click on the stock: deal to the waste, or recycle the waste when the
@@ -138,7 +161,7 @@ impl Klondike {
         if self.board.stock.is_empty() && self.board.waste.is_empty() {
             return false;
         }
-        self.history.push(self.board.clone());
+        self.checkpoint(false);
         let b = &mut self.board;
         if b.stock.is_empty() {
             while let Some(mut c) = b.waste.pop() {
@@ -203,11 +226,16 @@ impl Klondike {
         }
     }
 
+    /// A player move.
     pub fn move_cards(&mut self, from: PileId, count: usize, to: PileId) -> bool {
+        self.apply_move(from, count, to, false)
+    }
+
+    fn apply_move(&mut self, from: PileId, count: usize, to: PileId, automatic: bool) -> bool {
         if !self.can_move(from, count, to) {
             return false;
         }
-        self.history.push(self.board.clone());
+        self.checkpoint(automatic);
 
         let src = self.pile_mut(from);
         let moving = src.split_off(src.len() - count);
@@ -259,10 +287,118 @@ impl Klondike {
                 .map(PileId::Foundation)
                 .find(|&to| self.can_move(from, 1, to))
             {
-                return self.move_cards(from, 1, to);
+                return self.apply_move(from, 1, to, true);
             }
         }
         false
+    }
+
+    fn foundation_for(&self, from: PileId) -> Option<PileId> {
+        (0..PileId::FOUNDATIONS)
+            .map(PileId::Foundation)
+            .find(|&to| self.can_move(from, 1, to))
+    }
+
+    /// Whether a card can go to its foundation without ever being needed in the
+    /// tableau again: both cards that could be built on it (next rank down,
+    /// opposite colour) are already on foundations.
+    fn is_safe_for_foundation(&self, card: Card) -> bool {
+        if card.rank <= 2 {
+            return true;
+        }
+        let opposite: Vec<_> = self
+            .board
+            .foundations
+            .iter()
+            .filter(|f| f.first().is_some_and(|c| c.color() != card.color()))
+            .collect();
+        opposite.len() == 2 && opposite.iter().all(|f| f.len() as u8 >= card.rank - 1)
+    }
+
+    /// Makes one safe move to a foundation, as an automatic move. Returns false
+    /// when there is none.
+    pub fn auto_move_step(&mut self) -> bool {
+        let sources =
+            std::iter::once(PileId::Waste).chain((0..PileId::TABLEAUS).map(PileId::Tableau));
+        for from in sources {
+            let Some(&card) = self.pile(from).last() else {
+                continue;
+            };
+            if !self.is_safe_for_foundation(card) {
+                continue;
+            }
+            if let Some(to) = self.foundation_for(from) {
+                return self.apply_move(from, 1, to, true);
+            }
+        }
+        false
+    }
+
+    /// Useful moves, best first, ending with [`Hint::Draw`] while the stock or
+    /// waste can still be cycled. Moves that only shuffle cards around, like a
+    /// run between columns that reveals nothing, are left out.
+    pub fn hints(&self) -> Vec<Hint> {
+        let tableaus = || (0..PileId::TABLEAUS).map(PileId::Tableau);
+        let mut scored: Vec<(u32, Hint)> = Vec::new();
+        let mut push = |score, from, count, to| scored.push((score, Hint::Move { from, count, to }));
+
+        if !self.board.waste.is_empty() {
+            if let Some(to) = self.foundation_for(PileId::Waste) {
+                push(100, PileId::Waste, 1, to);
+            }
+            if let Some(to) = tableaus().find(|&to| self.can_move(PileId::Waste, 1, to)) {
+                push(50, PileId::Waste, 1, to);
+            }
+        }
+
+        for from in tableaus() {
+            let pile = self.pile(from);
+            let Some(first_up) = pile.iter().position(|c| c.face_up) else {
+                continue;
+            };
+            let reveals = |idx: usize| idx > 0 && !pile[idx - 1].face_up;
+
+            if let Some(to) = self.foundation_for(from) {
+                let bonus = if reveals(pile.len() - 1) { 20 } else { 0 };
+                push(100 + bonus, from, 1, to);
+            }
+
+            for idx in first_up..pile.len() {
+                let score = if reveals(idx) {
+                    80
+                } else if idx == 0 {
+                    // Clears the column; only counted onto a real card below.
+                    30
+                } else if self.fits_a_foundation(pile[idx - 1]) {
+                    // Splitting a run frees the card left behind for a foundation.
+                    60
+                } else {
+                    continue;
+                };
+                let count = pile.len() - idx;
+                let target = tableaus().find(|&to| {
+                    !(idx == 0 && self.pile(to).is_empty()) && self.can_move(from, count, to)
+                });
+                if let Some(to) = target {
+                    push(score, from, count, to);
+                }
+            }
+        }
+
+        // Stable sort keeps scan order among equally good moves.
+        scored.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
+        let mut hints: Vec<Hint> = scored.into_iter().map(|(_, h)| h).collect();
+        if !self.board.stock.is_empty() || !self.board.waste.is_empty() {
+            hints.push(Hint::Draw);
+        }
+        hints
+    }
+
+    fn fits_a_foundation(&self, card: Card) -> bool {
+        self.board.foundations.iter().any(|f| match f.last() {
+            None => card.rank == 1,
+            Some(top) => top.suit == card.suit && card.rank == top.rank + 1,
+        })
     }
 }
 
@@ -381,5 +517,55 @@ mod tests {
         assert!(g.can_autocomplete());
         while g.autocomplete_step() {}
         assert!(g.is_won());
+    }
+
+    #[test]
+    fn undo_rolls_back_automatic_moves_with_player_move() {
+        let mut g = empty_game();
+        g.board.tableau[0] = vec![up(1, Suit::Hearts), up(5, Suit::Clubs)];
+        g.board.tableau[1] = vec![up(6, Suit::Diamonds)];
+        assert!(g.move_cards(PileId::Tableau(0), 1, PileId::Tableau(1)));
+        assert!(g.auto_move_step(), "ace is now exposed and always safe");
+        assert!(!g.auto_move_step());
+        assert!(g.undo());
+        assert_eq!(g.pile(PileId::Tableau(0)).len(), 2);
+        assert_eq!(g.pile(PileId::Tableau(1)).len(), 1);
+        assert!(!g.can_undo());
+    }
+
+    #[test]
+    fn safe_auto_move_waits_for_opposite_colours() {
+        let mut g = empty_game();
+        g.board.foundations[0] = (1..=2).map(|r| up(r, Suit::Hearts)).collect();
+        g.board.tableau[0] = vec![up(3, Suit::Hearts)];
+        // Black twos could still need the red three in the tableau.
+        assert!(!g.auto_move_step());
+        g.board.foundations[1] = (1..=2).map(|r| up(r, Suit::Clubs)).collect();
+        assert!(!g.auto_move_step(), "spades still missing");
+        g.board.foundations[2] = (1..=2).map(|r| up(r, Suit::Spades)).collect();
+        assert!(g.auto_move_step());
+        assert_eq!(g.pile(PileId::Foundation(0)).len(), 3);
+    }
+
+    #[test]
+    fn hints_prefer_foundation_and_reveals_and_skip_pointless_moves() {
+        let mut g = empty_game();
+        g.board.tableau[0] = vec![Card::new(4, Suit::Clubs), up(9, Suit::Hearts)];
+        g.board.tableau[1] = vec![up(10, Suit::Spades)];
+        g.board.tableau[2] = vec![up(10, Suit::Clubs), up(9, Suit::Diamonds)];
+        g.board.tableau[3] = vec![up(1, Suit::Spades)];
+        let hints = g.hints();
+        assert_eq!(
+            hints[0],
+            Hint::Move { from: PileId::Tableau(3), count: 1, to: PileId::Foundation(0) }
+        );
+        assert!(hints.contains(&Hint::Move {
+            from: PileId::Tableau(0),
+            count: 1,
+            to: PileId::Tableau(1)
+        }));
+        // Moving the 9 of diamonds off the 10 of clubs reveals nothing.
+        assert!(!hints.iter().any(|h| matches!(h, Hint::Move { from: PileId::Tableau(2), .. })));
+        assert!(!hints.contains(&Hint::Draw), "stock and waste are empty");
     }
 }
