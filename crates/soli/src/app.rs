@@ -1,4 +1,5 @@
 use crate::anim::{Animator, CardKey};
+use crate::art::{self, Animal};
 use crate::layout::Layout;
 use crate::persist::{Settings, Stats};
 use crate::render::{self, BACKS, TABLES};
@@ -406,14 +407,12 @@ impl App {
                 Overlay::Stats
             };
         }
-        if is_key_pressed(KeyCode::G) {
-            self.overlay = if self.overlay == Overlay::Games {
-                Overlay::None
-            } else {
-                Overlay::Games
-            };
-        }
         if self.overlay == Overlay::Games {
+            // N again (or Enter) deals another game of the current kind.
+            if is_key_pressed(KeyCode::N) || is_key_pressed(KeyCode::Enter) {
+                self.choose_variant(self.game.variant());
+                return;
+            }
             const DIGITS: [KeyCode; 6] = [
                 KeyCode::Key1,
                 KeyCode::Key2,
@@ -424,13 +423,18 @@ impl App {
             ];
             if let Some(i) = DIGITS.iter().position(|&k| is_key_pressed(k)) {
                 self.choose_variant(Variant::ALL[i]);
+                return;
             }
         }
         if self.overlay != Overlay::None {
             return;
         }
 
-        if is_key_pressed(KeyCode::N) || is_key_pressed(KeyCode::F2) {
+        if is_key_pressed(KeyCode::N) {
+            self.overlay = Overlay::Games;
+            return;
+        }
+        if is_key_pressed(KeyCode::F2) {
             self.start_round(random_seed(), self.game.variant());
         }
         if is_key_pressed(KeyCode::R) {
@@ -579,10 +583,10 @@ impl App {
         for pile in self.game.piles() {
             let slot = layout.rect_at(layout.slot(pile));
             let label = slot_label(self.game.variant(), pile);
-            render::draw_slot(slot, label, table);
+            render::draw_slot(slot, label);
             let klondike = matches!(self.game.variant(), Variant::Klondike(_));
             if pile == PileId::Stock && klondike && !self.game.pile(PileId::Waste).is_empty() {
-                render::draw_recycle_mark(slot, table);
+                render::draw_recycle_mark(slot);
             }
         }
 
@@ -708,53 +712,77 @@ impl App {
         let (sw, sh) = (screen_width(), screen_height());
         let h = layout.status_height;
         let y = sh - h;
-        draw_rectangle(0.0, y, sw, h, Color::new(0.0, 0.0, 0.0, 0.35));
+        let cy = y + h / 2.0;
+        draw_rectangle(0.0, y, sw, h, Color::new(0.0, 0.0, 0.0, 0.28));
 
-        let size = 15.0;
-        let baseline = y + (h + render::measure("M", size).offset_y) / 2.0;
-        let pad = 12.0;
+        let size = 14.0;
+        let baseline = ui::baseline_for(cy, size);
+        let pad = 20.0;
 
-        let left = format!(
-            "{}     Moves {}     Time {}     Deal #{}",
-            self.game.variant().name(),
-            self.game.moves(),
-            format_time(self.elapsed as u32),
-            self.game.deal_number()
-        );
-        render::text(&left, pad, baseline, size, WHITE);
+        let mut x = pad;
+        render::text(self.game.variant().name(), x, baseline, size, ui::FG);
+        x += render::measure(self.game.variant().name(), size).width + 28.0;
+        let fields = [
+            ("Moves", self.game.moves().to_string()),
+            ("Time", format_time(self.elapsed as u32)),
+            ("Deal", format!("#{}", self.game.deal_number())),
+        ];
+        for (label, value) in fields {
+            render::text(label, x, baseline, size, ui::DIM);
+            x += render::measure(label, size).width + 6.0;
+            render::text(&value, x, baseline, size, ui::FG);
+            x += render::measure(&value, size).width + 24.0;
+        }
 
-        let right = if self.game.can_autocomplete() && !self.autoplay {
-            "A  auto-finish"
+        let hints: &[(&str, &str)] = if self.game.can_autocomplete() && !self.autoplay {
+            &[("A", "auto-finish")]
         } else {
-            "G  game     H  hint     S  stats     F1  help"
+            &[
+                ("N", "new game"),
+                ("H", "hint"),
+                ("S", "stats"),
+                ("F1", "help"),
+            ]
         };
-        ui::right_text(right, sw - pad, baseline, size, WHITE);
+        ui::key_hints(hints, sw - pad - ui::key_hints_width(hints), cy);
     }
 
     fn draw_win_banner(&self) {
-        let r = ui::panel(480.0, 150.0);
+        let r = ui::panel(460.0, 230.0);
         let cx = r.x + r.w / 2.0;
-        ui::centered_text("You won!", cx, r.y + 56.0, 40.0, WHITE);
+        art::draw_icon(
+            Animal::Fox,
+            Rect::new(cx - 18.0, r.y + 30.0, 36.0, 36.0),
+            1.8,
+            ui::ACCENT,
+        );
+        ui::centered_text("You won", cx, r.y + 116.0, 38.0, ui::FG);
+
         let stats = self.stats.mode(self.game.variant());
         let secs = self.elapsed as u32;
-        let record = if stats.best_time_secs == Some(secs) && stats.won > 1 {
-            "  New best time!"
-        } else {
-            ""
-        };
-        let sub = format!(
-            "{} moves in {}.{record}",
-            self.game.moves(),
-            format_time(secs)
-        );
-        ui::centered_text(&sub, cx, r.y + 94.0, 18.0, WHITE);
-        ui::centered_text("N  new game     S  stats", cx, r.y + 126.0, 15.0, ui::DIM);
+        let size = 16.0;
+        let sub = format!("{} moves in {}", self.game.moves(), format_time(secs));
+        let record =
+            (stats.best_time_secs == Some(secs) && stats.won > 1).then_some("  ·  New best time");
+        let sub_w = render::measure(&sub, size).width
+            + record.map_or(0.0, |t| render::measure(t, size).width);
+        let mut x = cx - sub_w / 2.0;
+        let baseline = r.y + 152.0;
+        render::text(&sub, x, baseline, size, ui::DIM);
+        if let Some(t) = record {
+            x += render::measure(&sub, size).width;
+            render::text(t, x, baseline, size, ui::ACCENT);
+        }
+
+        let hints = [("N", "new game"), ("S", "stats")];
+        let w = ui::key_hints_width(&hints);
+        ui::key_hints(&hints, cx - w / 2.0, r.y + 192.0);
     }
 
     fn draw_stats(&self) {
         let r = ui::panel(760.0, 160.0 + Variant::ALL.len() as f32 * 34.0);
         let cx = r.x + r.w / 2.0;
-        ui::centered_text("Statistics", cx, r.y + 44.0, 26.0, WHITE);
+        ui::centered_text("Statistics", cx, r.y + 44.0, 26.0, ui::FG);
 
         let size = 15.0;
         type Column = (
@@ -789,7 +817,7 @@ impl App {
             let color = if variant == current {
                 ui::ACCENT
             } else {
-                WHITE
+                ui::FG
             };
             render::text(variant.name(), r.x + 32.0, y, size, color);
             for (i, (_, value)) in columns.iter().enumerate() {
@@ -810,46 +838,68 @@ impl App {
     fn draw_games(&self) {
         let (panel, rows) = games_menu();
         let r = ui::panel(panel.w, panel.h);
-        let cx = r.x + r.w / 2.0;
-        ui::centered_text("Choose a game", cx, r.y + 44.0, 26.0, WHITE);
-        let mouse: Vec2 = mouse_position().into();
+        let left = r.x + 28.0;
         let current = self.game.variant();
+        render::text("New game", left, r.y + 56.0, 28.0, ui::FG);
+        let sub = format!(
+            "Pick a game, or press N again for another {}.",
+            current.name()
+        );
+        render::text(&sub, left, r.y + 84.0, 14.0, ui::DIM);
+
+        let mouse: Vec2 = mouse_position().into();
         for (i, (variant, row)) in Variant::ALL.iter().zip(&rows).enumerate() {
-            if row.contains(mouse) {
-                render::rounded_rect(*row, 8.0, Color::new(1.0, 1.0, 1.0, 0.08));
+            let is_current = *variant == current;
+            if is_current {
+                render::rounded_rect(*row, 10.0, render::alpha(ui::ACCENT, 0.10));
+            } else if row.contains(mouse) {
+                render::rounded_rect(*row, 10.0, render::alpha(ui::FG, 0.06));
             }
-            let baseline = row.y + (row.h + render::measure("M", 17.0).offset_y) / 2.0;
-            let color = if *variant == current {
-                ui::ACCENT
-            } else {
-                WHITE
+            let cy = row.center().y;
+            let color = if is_current { ui::ACCENT } else { ui::FG };
+            ui::keycap(&(i + 1).to_string(), row.x + 12.0, cy, ui::FG);
+            let animal = match variant {
+                Variant::Klondike(_) => Animal::Fox,
+                Variant::Spider(_) => Animal::Spider,
+                Variant::FreeCell => Animal::Swallow,
             };
-            render::text(&(i + 1).to_string(), row.x + 16.0, baseline, 17.0, ui::DIM);
-            render::text(variant.name(), row.x + 52.0, baseline, 17.0, color);
+            art::draw_icon(
+                animal,
+                Rect::new(row.x + 50.0, cy - 13.0, 26.0, 26.0),
+                1.6,
+                color,
+            );
+            let baseline = ui::baseline_for(cy, 17.0);
+            render::text(variant.name(), row.x + 92.0, baseline, 17.0, color);
+
             let stats = self.stats.mode(*variant);
             let summary = match stats.win_rate() {
                 Some(rate) => format!("{} played · {:.0}% won", stats.played, rate * 100.0),
                 None => "not played yet".to_owned(),
             };
-            ui::right_text(&summary, row.x + row.w - 16.0, baseline, 14.0, ui::DIM);
+            let mut right = row.x + row.w - 12.0;
+            if is_current {
+                right -= ui::keycap("N", right - 22.0, cy, ui::ACCENT) + 14.0;
+            }
+            ui::right_text(&summary, right, ui::baseline_for(cy, 13.0), 13.0, ui::DIM);
         }
-        let footer = "Number key or click to start a new game  ·  Esc to keep this deal";
-        ui::centered_text(footer, cx, r.y + r.h - 20.0, 13.0, ui::DIM);
+        let footer = "1–6 or click to choose   ·   N  same game   ·   Esc  keep this deal";
+        ui::centered_text(footer, r.x + r.w / 2.0, r.y + r.h - 24.0, 13.0, ui::DIM);
     }
 }
 
 /// Panel and row rectangles of the game chooser, shared by drawing and
 /// clicking.
 fn games_menu() -> (Rect, Vec<Rect>) {
-    let row_h = 44.0;
-    let (w, h) = (540.0f32, 110.0 + Variant::ALL.len() as f32 * row_h);
+    let row_h = 60.0;
+    let (w, h) = (600.0f32, 166.0 + Variant::ALL.len() as f32 * row_h);
     let (sw, sh) = (screen_width(), screen_height());
     let (w, h) = (w.min(sw), h.min(sh));
     let panel = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
     let rows = (0..Variant::ALL.len())
         .map(|i| {
-            let y = panel.y + 66.0 + i as f32 * row_h;
-            Rect::new(panel.x + 20.0, y, panel.w - 40.0, row_h - 4.0)
+            let y = panel.y + 106.0 + i as f32 * row_h;
+            Rect::new(panel.x + 16.0, y, panel.w - 32.0, row_h - 4.0)
         })
         .collect();
     (panel, rows)
@@ -874,8 +924,8 @@ fn draw_help() {
         ("Ctrl+Z", "Undo"),
         ("A", "Auto-finish when possible"),
         ("M", "Toggle auto-move to foundations"),
-        ("N  /  R", "New game  /  Restart deal"),
-        ("G", "Choose game"),
+        ("N  /  N N", "Choose game  /  New deal, same game"),
+        ("F2  /  R", "New deal  /  Restart deal"),
         ("T", "Change table colour"),
         ("B", "Change card back"),
         ("S", "Statistics"),
@@ -883,11 +933,11 @@ fn draw_help() {
     ];
     let row_h = 27.0;
     let r = ui::panel(500.0, 90.0 + entries.len() as f32 * row_h);
-    ui::centered_text("Keys", r.x + r.w / 2.0, r.y + 44.0, 26.0, WHITE);
+    ui::centered_text("Keys", r.x + r.w / 2.0, r.y + 44.0, 26.0, ui::FG);
     let mut y = r.y + 82.0;
     for (k, what) in entries {
         ui::right_text(k, r.x + 170.0, y, 15.0, ui::ACCENT);
-        render::text(what, r.x + 190.0, y, 15.0, WHITE);
+        render::text(what, r.x + 190.0, y, 15.0, ui::FG);
         y += row_h;
     }
 }

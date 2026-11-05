@@ -1,7 +1,7 @@
 use macroquad::prelude::*;
 use soli_core::{Game, PileId, Variant};
 
-const STATUS_HEIGHT: f32 = 30.0;
+const STATUS_HEIGHT: f32 = 40.0;
 
 /// Screen geometry, recomputed every frame so the table follows window resizes.
 pub struct Layout {
@@ -57,7 +57,7 @@ impl Layout {
             bottom: sh - status_height - margin * 0.5,
             fan_up: h * 0.27,
             fan_down: h * 0.11,
-            fan_waste: w * 0.24,
+            fan_waste: w * 0.44,
             fan_stock: w * 0.12,
         }
     }

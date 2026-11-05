@@ -4,6 +4,7 @@
 
 mod anim;
 mod app;
+mod art;
 mod layout;
 mod persist;
 mod render;

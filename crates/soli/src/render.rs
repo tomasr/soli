@@ -1,6 +1,7 @@
-//! Card drawing. Cards are built from primitives; the only asset is the
-//! embedded UI font.
+//! Card drawing and the palette. Cards are built from primitives; the only
+//! asset is the embedded UI font.
 
+use crate::art::{self, Animal};
 use macroquad::prelude::*;
 use soli_core::{Card, Suit};
 use std::f32::consts::PI;
@@ -11,7 +12,7 @@ static FONT: OnceLock<Font> = OnceLock::new();
 /// Loads the embedded font. Must run once, inside the macroquad context, before
 /// anything draws text.
 pub fn init_font() {
-    let font = load_ttf_font_from_bytes(include_bytes!("../assets/fonts/Inter-SemiBold.ttf"))
+    let font = load_ttf_font_from_bytes(include_bytes!("../assets/fonts/InterTight-SemiBold.ttf"))
         .expect("embedded font is valid");
     let _ = FONT.set(font);
 }
@@ -36,10 +37,6 @@ pub fn measure(text: &str, size: f32) -> TextDimensions {
 
 /// Draws `text` with its baseline at `y`.
 pub fn text(text: &str, x: f32, y: f32, size: f32, color: Color) {
-    text_rotated(text, x, y, size, color, 0.0);
-}
-
-fn text_rotated(text: &str, x: f32, y: f32, size: f32, color: Color, rotation: f32) {
     let (px, scale) = font_px(size);
     draw_text_ex(
         text,
@@ -49,108 +46,101 @@ fn text_rotated(text: &str, x: f32, y: f32, size: f32, color: Color, rotation: f
             font: Some(font()),
             font_size: px,
             font_scale: scale,
-            rotation,
             color,
             ..Default::default()
         },
     );
 }
 
-const CARD_FACE: Color = Color::new(0.99, 0.99, 0.97, 1.0);
-const CARD_EDGE: Color = Color::new(0.25, 0.25, 0.25, 1.0);
-const RED: Color = Color::new(0.80, 0.08, 0.14, 1.0);
-const BLACK_INK: Color = Color::new(0.08, 0.08, 0.10, 1.0);
-pub const HIGHLIGHT: Color = Color::new(1.0, 0.85, 0.2, 0.9);
-pub const HINT: Color = Color::new(0.35, 0.85, 1.0, 1.0);
+/// Builds an opaque colour from 8-bit channels.
+pub const fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0)
+}
+
+/// Same colour with a different alpha.
+pub const fn alpha(c: Color, a: f32) -> Color {
+    Color::new(c.r, c.g, c.b, a)
+}
+
+// The palette: a quiet, dark table so the cards carry the colour.
+/// Card faces and the light end of every contrast pair.
+pub const PAPER: Color = rgb(0xF2, 0xEE, 0xE6);
+/// Spades and clubs.
+pub const INK: Color = rgb(0x1D, 0x1F, 0x1E);
+/// Hearts and diamonds.
+pub const BRICK: Color = rgb(0xA8, 0x43, 0x2F);
+/// Hints, selection and records.
+pub const OCHRE: Color = rgb(0xD9, 0xA4, 0x41);
+/// Primary text on the table.
+pub const TEXT: Color = rgb(0xEC, 0xE8, 0xDF);
+/// Secondary text on the table.
+pub const MIST: Color = rgb(0x9D, 0xA5, 0x9E);
+
+pub const HIGHLIGHT: Color = alpha(PAPER, 0.55);
+pub const HINT: Color = OCHRE;
+const CARD_SHADOW: Color = Color::new(0.0, 0.0, 0.0, 0.3);
+const SLOT_LINE: Color = alpha(PAPER, 0.16);
+const SLOT_MARK: Color = alpha(PAPER, 0.22);
 
 pub struct Table {
     pub name: &'static str,
     pub felt: Color,
 }
 
-impl Table {
-    fn slot(&self) -> Color {
-        mix(self.felt, BLACK, 0.2)
-    }
-
-    fn mark(&self) -> Color {
-        mix(self.felt, WHITE, 0.22)
-    }
-}
-
-pub const TABLES: [Table; 4] = [
+pub const TABLES: [Table; 3] = [
     Table {
-        name: "Green",
-        felt: Color::new(0.10, 0.40, 0.22, 1.0),
-    },
-    Table {
-        name: "Blue",
-        felt: Color::new(0.09, 0.24, 0.42, 1.0),
-    },
-    Table {
-        name: "Burgundy",
-        felt: Color::new(0.38, 0.09, 0.14, 1.0),
+        name: "Moss",
+        felt: rgb(0x1E, 0x2A, 0x23),
     },
     Table {
         name: "Slate",
-        felt: Color::new(0.21, 0.24, 0.27, 1.0),
+        felt: rgb(0x1C, 0x22, 0x28),
+    },
+    Table {
+        name: "Umber",
+        felt: rgb(0x2A, 0x22, 0x1E),
     },
 ];
-
-pub enum Pattern {
-    Lattice,
-    Stripes,
-    Dots,
-}
 
 pub struct Back {
     pub name: &'static str,
     base: Color,
-    ink: Color,
-    pattern: Pattern,
+    line: Color,
+    animal: Animal,
 }
 
 pub const BACKS: [Back; 5] = [
     Back {
-        name: "Blue lattice",
-        base: Color::new(0.14, 0.24, 0.55, 1.0),
-        ink: Color::new(0.30, 0.42, 0.75, 1.0),
-        pattern: Pattern::Lattice,
+        name: "Fox",
+        base: rgb(0xB0, 0x57, 0x3A),
+        line: PAPER,
+        animal: Animal::Fox,
     },
     Back {
-        name: "Red lattice",
-        base: Color::new(0.62, 0.10, 0.14, 1.0),
-        ink: Color::new(0.80, 0.30, 0.32, 1.0),
-        pattern: Pattern::Lattice,
+        name: "Heron",
+        base: rgb(0x4C, 0x67, 0x79),
+        line: PAPER,
+        animal: Animal::Heron,
     },
     Back {
-        name: "Green stripes",
-        base: Color::new(0.10, 0.38, 0.26, 1.0),
-        ink: Color::new(0.22, 0.52, 0.38, 1.0),
-        pattern: Pattern::Stripes,
+        name: "Owl",
+        base: rgb(0xC2, 0x9A, 0x48),
+        line: INK,
+        animal: Animal::Owl,
     },
     Back {
-        name: "Plum dots",
-        base: Color::new(0.34, 0.16, 0.42, 1.0),
-        ink: Color::new(0.55, 0.36, 0.64, 1.0),
-        pattern: Pattern::Dots,
+        name: "Whale",
+        base: rgb(0x2E, 0x5B, 0x57),
+        line: PAPER,
+        animal: Animal::Whale,
     },
     Back {
-        name: "Charcoal stripes",
-        base: Color::new(0.18, 0.19, 0.21, 1.0),
-        ink: Color::new(0.34, 0.35, 0.38, 1.0),
-        pattern: Pattern::Stripes,
+        name: "Hare",
+        base: rgb(0x6D, 0x54, 0x65),
+        line: PAPER,
+        animal: Animal::Hare,
     },
 ];
-
-fn mix(a: Color, b: Color, t: f32) -> Color {
-    Color::new(
-        a.r + (b.r - a.r) * t,
-        a.g + (b.g - a.g) * t,
-        a.b + (b.b - a.b) * t,
-        a.a + (b.a - a.a) * t,
-    )
-}
 
 /// Filled rounded rectangle, drawn as a triangle fan so no pixel is covered
 /// twice (overlapping pieces would show darker seams with translucent colours).
@@ -187,9 +177,34 @@ fn corner_radius(r: Rect) -> f32 {
     r.w * 0.08
 }
 
-/// Empty pile placeholder.
-pub fn draw_slot(r: Rect, label: Option<&str>, table: &Table) {
-    rounded_rect(r, corner_radius(r), table.slot());
+/// Outline of a rounded rectangle.
+pub fn rounded_rect_lines(r: Rect, radius: f32, thickness: f32, color: Color) {
+    const SEGMENTS: usize = 6;
+    let rad = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
+    let corners = [
+        (vec2(r.x + r.w - rad, r.y + rad), -PI / 2.0),
+        (vec2(r.x + r.w - rad, r.y + r.h - rad), 0.0),
+        (vec2(r.x + rad, r.y + r.h - rad), PI / 2.0),
+        (vec2(r.x + rad, r.y + rad), PI),
+    ];
+    let points: Vec<Vec2> = corners
+        .iter()
+        .flat_map(|&(c, start)| {
+            (0..=SEGMENTS).map(move |i| {
+                let a = start + (i as f32 / SEGMENTS as f32) * (PI / 2.0);
+                c + vec2(a.cos(), a.sin()) * rad
+            })
+        })
+        .collect();
+    for (i, &a) in points.iter().enumerate() {
+        let b = points[(i + 1) % points.len()];
+        draw_line(a.x, a.y, b.x, b.y, thickness, color);
+    }
+}
+
+/// Empty pile placeholder: a faint outline with an optional letter.
+pub fn draw_slot(r: Rect, label: Option<&str>) {
+    rounded_rect_lines(r, corner_radius(r), (r.w * 0.014).max(1.0), SLOT_LINE);
     if let Some(text) = label {
         let size = r.w * 0.4;
         let m = measure(text, size);
@@ -198,15 +213,15 @@ pub fn draw_slot(r: Rect, label: Option<&str>, table: &Table) {
             r.x + (r.w - m.width) / 2.0,
             r.y + (r.h + m.offset_y) / 2.0,
             size,
-            table.mark(),
+            SLOT_MARK,
         );
     }
 }
 
 /// Ring shown on an empty stock when clicking it will recycle the waste.
-pub fn draw_recycle_mark(r: Rect, table: &Table) {
+pub fn draw_recycle_mark(r: Rect) {
     let c = r.center();
-    draw_circle_lines(c.x, c.y, r.w * 0.22, (r.w * 0.05).max(1.5), table.mark());
+    draw_circle_lines(c.x, c.y, r.w * 0.22, (r.w * 0.04).max(1.5), SLOT_MARK);
 }
 
 pub fn draw_outline(r: Rect, color: Color) {
@@ -220,222 +235,94 @@ pub fn draw_outline(r: Rect, color: Color) {
 
 pub fn draw_card(card: Card, r: Rect, back: &Back) {
     let radius = corner_radius(r);
-    let edge = (r.w * 0.012).max(1.0);
-    rounded_rect(r, radius, CARD_EDGE);
-    let inner = Rect::new(r.x + edge, r.y + edge, r.w - 2.0 * edge, r.h - 2.0 * edge);
-    rounded_rect(inner, radius - edge, CARD_FACE);
+    // A hard drop edge reads as card thickness and separates stacked cards.
+    let drop = (r.w * 0.014).max(1.0);
+    rounded_rect(Rect::new(r.x, r.y + drop, r.w, r.h), radius, CARD_SHADOW);
     if card.face_up {
-        draw_face(card, inner);
+        rounded_rect(r, radius, PAPER);
+        draw_face(card, r);
     } else {
-        draw_back(inner, back);
+        draw_back(r, back);
     }
 }
 
 fn draw_back(r: Rect, back: &Back) {
-    let pad = r.w * 0.07;
-    let b = Rect::new(r.x + pad, r.y + pad, r.w - 2.0 * pad, r.h - 2.0 * pad);
-    rounded_rect(b, r.w * 0.05, back.base);
-    let thick = (r.w * 0.015).max(1.0);
-    let ink = back.ink;
-    match back.pattern {
-        Pattern::Lattice => {
-            let step = b.w / 6.0;
-            let mut d = -b.h;
-            while d < b.w {
-                clipped_line(
-                    b,
-                    vec2(b.x + d, b.y),
-                    vec2(b.x + d + b.h, b.y + b.h),
-                    thick,
-                    ink,
-                );
-                clipped_line(
-                    b,
-                    vec2(b.x + d + b.h, b.y),
-                    vec2(b.x + d, b.y + b.h),
-                    thick,
-                    ink,
-                );
-                d += step;
-            }
-        }
-        Pattern::Stripes => {
-            let step = b.w / 7.0;
-            let mut d = -b.h;
-            while d < b.w {
-                clipped_line(
-                    b,
-                    vec2(b.x + d, b.y),
-                    vec2(b.x + d + b.h, b.y + b.h),
-                    thick * 3.0,
-                    ink,
-                );
-                d += step;
-            }
-        }
-        Pattern::Dots => {
-            let step = b.w / 6.0;
-            let radius = step * 0.22;
-            let rows = (b.h / step).floor().max(1.0) as i32;
-            let y0 = b.y + (b.h - (rows - 1) as f32 * step) / 2.0;
-            for row in 0..rows {
-                // Alternate rows are offset by half a step.
-                let shift = if row % 2 == 0 { 0.5 } else { 1.0 };
-                let mut x = b.x + step * (shift - 0.25);
-                while x < b.x + b.w - radius {
-                    draw_circle(x, y0 + row as f32 * step, radius, ink);
-                    x += step;
-                }
-            }
-        }
-    }
-}
-
-/// Draws the part of a line segment that falls inside `r`.
-fn clipped_line(r: Rect, a: Vec2, b: Vec2, thick: f32, color: Color) {
-    // Liang-Barsky clipping.
-    let d = b - a;
-    let (mut t0, mut t1) = (0.0f32, 1.0f32);
-    for (p, q) in [
-        (-d.x, a.x - r.x),
-        (d.x, r.x + r.w - a.x),
-        (-d.y, a.y - r.y),
-        (d.y, r.y + r.h - a.y),
-    ] {
-        if p == 0.0 {
-            if q < 0.0 {
-                return;
-            }
-        } else {
-            let t = q / p;
-            if p < 0.0 {
-                t0 = t0.max(t);
-            } else {
-                t1 = t1.min(t);
-            }
-        }
-    }
-    if t0 < t1 {
-        let (s, e) = (a + d * t0, a + d * t1);
-        draw_line(s.x, s.y, e.x, e.y, thick, color);
-    }
+    let radius = corner_radius(r);
+    rounded_rect(r, radius, back.base);
+    let inset = (r.w * 0.06).max(3.0);
+    let frame = Rect::new(
+        r.x + inset,
+        r.y + inset,
+        r.w - 2.0 * inset,
+        r.h - 2.0 * inset,
+    );
+    rounded_rect_lines(
+        frame,
+        (radius - inset + 2.0).max(2.0),
+        (r.w * 0.01).max(1.0),
+        alpha(back.line, 0.35),
+    );
+    art::draw_back(back.animal, r, (r.w * 0.018).max(1.0), back.line);
 }
 
 fn ink(card: Card) -> Color {
     match card.color() {
-        soli_core::Color::Red => RED,
-        soli_core::Color::Black => BLACK_INK,
-    }
-}
-
-/// Pip positions for 2..=10 on a grid where x is the column (-1, 0, 1) and y
-/// runs from -1 (top row) to 1 (bottom row). Pips below the middle are drawn
-/// upside down, as on printed cards.
-#[rustfmt::skip]
-fn pip_layout(rank: u8) -> &'static [(f32, f32)] {
-    const T: f32 = 1.0 / 3.0;
-    match rank {
-        2 => &[(0.0, -1.0), (0.0, 1.0)],
-        3 => &[(0.0, -1.0), (0.0, 0.0), (0.0, 1.0)],
-        4 => &[(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)],
-        5 => &[(-1.0, -1.0), (1.0, -1.0), (0.0, 0.0), (-1.0, 1.0), (1.0, 1.0)],
-        6 => &[(-1.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (1.0, 1.0)],
-        7 => &[(-1.0, -1.0), (1.0, -1.0), (0.0, -0.5),
-               (-1.0, 0.0), (1.0, 0.0),
-               (-1.0, 1.0), (1.0, 1.0)],
-        8 => &[(-1.0, -1.0), (1.0, -1.0), (0.0, -0.5),
-               (-1.0, 0.0), (1.0, 0.0),
-               (0.0, 0.5), (-1.0, 1.0), (1.0, 1.0)],
-        9 => &[(-1.0, -1.0), (1.0, -1.0), (-1.0, -T), (1.0, -T),
-               (0.0, 0.0),
-               (-1.0, T), (1.0, T), (-1.0, 1.0), (1.0, 1.0)],
-        10 => &[(-1.0, -1.0), (1.0, -1.0), (0.0, -2.0 * T), (-1.0, -T), (1.0, -T),
-                (-1.0, T), (1.0, T), (0.0, 2.0 * T), (-1.0, 1.0), (1.0, 1.0)],
-        _ => &[],
+        soli_core::Color::Red => BRICK,
+        soli_core::Color::Black => INK,
     }
 }
 
 fn draw_face(card: Card, r: Rect) {
     let color = ink(card);
     let label = card.rank_label();
-    let font_size = r.w * 0.2;
-    let m = measure(label, font_size);
-    let pad = r.w * 0.05;
-    let small = r.w * 0.12;
 
-    // Corner indices: rank with a small suit beneath it, repeated upside down
-    // in the opposite corner. Centred on a fixed column so "10" lines up.
-    let column = r.w * 0.08;
-    let index_cx = r.x + pad + column;
-    let text_y = r.y + pad + m.offset_y;
-    text(label, index_cx - m.width / 2.0, text_y, font_size, color);
+    // Corner index: rank and suit side by side in the top-left, sized to
+    // read in the strip a fanned card leaves visible.
+    let pad_x = r.w * 0.096;
+    let pad_y = r.w * 0.08;
+    let rank_size = r.w * 0.24;
+    let m = measure(label, rank_size);
+    let baseline = r.y + pad_y + m.offset_y;
+    text(label, r.x + pad_x, baseline, rank_size, color);
+    let suit_size = r.w * 0.15;
     draw_suit(
         card.suit,
-        vec2(index_cx, text_y + small * 0.85),
-        small,
+        vec2(
+            r.x + pad_x + m.width + r.w * 0.03 + suit_size * 0.48,
+            baseline - suit_size * 0.5,
+        ),
+        suit_size,
         color,
     );
 
-    let br_cx = r.x + r.w - pad - column;
-    let br_y = r.y + r.h - pad - m.offset_y;
-    text_rotated(label, br_cx + m.width / 2.0, br_y, font_size, color, PI);
-    draw_suit_flipped(card.suit, vec2(br_cx, br_y - small * 0.85), small, color);
-
-    let center = vec2(r.x + r.w / 2.0, r.y + r.h / 2.0);
     match card.rank {
-        1 => draw_suit(card.suit, center, r.w * 0.45, color),
+        1 => {
+            let size = r.w * 0.56;
+            draw_suit(card.suit, vec2(r.center().x, r.y + r.h * 0.56), size, color);
+        }
         2..=10 => {
-            let (dx, dy) = (r.w * 0.17, r.h * 0.29);
-            let size = r.w * 0.15;
-            for &(px, py) in pip_layout(card.rank) {
-                let at = center + vec2(px * dx, py * dy);
-                if py > 0.0 {
-                    draw_suit_flipped(card.suit, at, size, color);
-                } else {
-                    draw_suit(card.suit, at, size, color);
-                }
-            }
+            // One large suit sits in the bottom-right corner.
+            let size = r.w * 0.44;
+            let pad = r.w * 0.1;
+            let c = vec2(r.x + r.w - pad - size * 0.48, r.y + r.h - pad - size * 0.5);
+            draw_suit(card.suit, c, size, color);
         }
         _ => {
-            // Court cards: a tinted, framed panel with the rank and suit.
-            let frame = Rect::new(r.x + r.w * 0.24, r.y + r.h * 0.17, r.w * 0.52, r.h * 0.66);
-            let tint = Color::new(color.r, color.g, color.b, 0.08);
-            draw_rectangle(frame.x, frame.y, frame.w, frame.h, tint);
-            draw_rectangle_lines(
-                frame.x,
-                frame.y,
-                frame.w,
-                frame.h,
-                (r.w * 0.02).max(1.0),
-                color,
-            );
-            let big = r.w * 0.36;
-            let bm = measure(label, big);
-            let baseline = center.y + bm.offset_y / 2.0 - r.h * 0.07;
-            text(label, center.x - bm.width / 2.0, baseline, big, color);
-            draw_suit(
-                card.suit,
-                vec2(center.x, center.y + r.h * 0.15),
-                r.w * 0.2,
-                color,
-            );
+            // Court cards carry an animal in the suit colour.
+            let animal = match card.rank {
+                11 => Animal::Fox,
+                12 => Animal::Heron,
+                _ => Animal::Owl,
+            };
+            let art = Rect::new(r.x + r.w * 0.17, r.y + r.h * 0.3, r.w * 0.66, r.h * 0.6);
+            art::draw_icon(animal, art, (r.w * 0.02).max(1.0), color);
         }
     }
 }
 
-pub fn draw_suit(suit: Suit, c: Vec2, size: f32, color: Color) {
-    draw_shape(suit, c, size, color, false);
-}
-
-fn draw_suit_flipped(suit: Suit, c: Vec2, size: f32, color: Color) {
-    draw_shape(suit, c, size, color, true);
-}
-
-/// Draws a suit symbol centred on `c` with overall height `s`, optionally
-/// upside down.
-fn draw_shape(suit: Suit, c: Vec2, s: f32, color: Color, flip: bool) {
-    let fy = if flip { -1.0 } else { 1.0 };
-    let p = |x: f32, y: f32| vec2(c.x + x * s, c.y + y * s * fy);
+/// Draws a suit symbol centred on `c` with overall height `s`.
+pub fn draw_suit(suit: Suit, c: Vec2, s: f32, color: Color) {
+    let p = |x: f32, y: f32| vec2(c.x + x * s, c.y + y * s);
     let circle = |x: f32, y: f32, r: f32| {
         let at = p(x, y);
         draw_circle(at.x, at.y, r * s, color);
