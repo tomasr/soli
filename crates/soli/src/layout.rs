@@ -31,7 +31,7 @@ fn columns(variant: Variant) -> usize {
         Variant::Klondike(_) => 7,
         Variant::Spider(_) => 10,
         Variant::FreeCell => 8,
-        Variant::Cairn => 0,
+        Variant::Cairn(_) => 0,
     }
 }
 
@@ -154,10 +154,10 @@ impl Layout {
             (Variant::Spider(_), PileId::Foundation(i)) => top(2 + i),
             (Variant::FreeCell, PileId::Foundation(i)) => top(i),
             (Variant::FreeCell, PileId::Cell(i)) => top(4 + i),
-            (Variant::Cairn, PileId::Stock) => self.under_layout[0],
-            (Variant::Cairn, PileId::Waste) => self.under_layout[1],
-            (Variant::Cairn, PileId::Cell(0)) => self.under_layout[2],
-            (Variant::Cairn, PileId::Foundation(0)) => self.under_layout[3],
+            (Variant::Cairn(_), PileId::Stock) => self.under_layout[0],
+            (Variant::Cairn(_), PileId::Waste) => self.under_layout[1],
+            (Variant::Cairn(_), PileId::Cell(0)) => self.under_layout[2],
+            (Variant::Cairn(_), PileId::Foundation(0)) => self.under_layout[3],
             (_, PileId::Slot(i)) if i < self.slots.len() => self.slots[i],
             // Piles the variant doesn't have are never drawn.
             _ => vec2(-1000.0, -1000.0),

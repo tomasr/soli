@@ -43,7 +43,7 @@ const COVERED_SHADE: Color = Color::new(0.0, 0.0, 0.0, 0.32);
 
 /// Games where cards are paired by clicking one and then the other.
 fn pairs_by_click(variant: Variant) -> bool {
-    matches!(variant, Variant::Cairn)
+    matches!(variant, Variant::Cairn(_))
 }
 
 #[derive(PartialEq)]
@@ -77,6 +77,11 @@ pub struct App {
     selected: Option<PileId>,
     toast: Option<(String, f64)>,
     overlay: Overlay,
+    /// Variant highlighted in the game chooser.
+    menu_focus: Variant,
+    /// Mouse position last frame, so hovering only moves the chooser's
+    /// highlight when the mouse actually moves.
+    last_mouse: Vec2,
     pub settings: Settings,
     stats: Stats,
     /// Settings and stats are written to disk (off for screenshot runs).
@@ -98,8 +103,9 @@ pub fn random_seed() -> u64 {
 impl App {
     pub fn new(settings: Settings, stats: Stats, seed: u64, persist: bool) -> Self {
         let auto = settings.auto_move;
+        let variant = settings.variant();
         App {
-            game: settings.variant().new_game(seed),
+            game: variant.new_game(seed),
             drag: None,
             anim: Animator::default(),
             animating: false,
@@ -116,6 +122,8 @@ impl App {
             selected: None,
             toast: None,
             overlay: Overlay::None,
+            menu_focus: variant,
+            last_mouse: Vec2::ZERO,
             settings,
             stats,
             persist,
@@ -157,6 +165,60 @@ impl App {
     /// it, so closing the chooser just plays that.
     pub fn open_game_chooser(&mut self) {
         self.overlay = Overlay::Games;
+        self.menu_focus = self.game.variant();
+    }
+
+    /// The variant to offer for a game: the one being played, else the one
+    /// played most, else the game's default.
+    fn preferred(&self, family: usize) -> Variant {
+        let f = &Variant::FAMILIES[family];
+        let current = self.game.variant();
+        if f.variants.contains(&current) {
+            return current;
+        }
+        f.variants
+            .iter()
+            .copied()
+            .filter(|&v| self.stats.mode(v).played > 0)
+            .max_by_key(|&v| self.stats.mode(v).played)
+            .unwrap_or(f.default)
+    }
+
+    /// Keyboard navigation in the game chooser.
+    fn menu_keys(&mut self) {
+        let family = self.menu_focus.family();
+        let families = Variant::FAMILIES.len();
+        let options = Variant::FAMILIES[family].variants;
+        let option = options
+            .iter()
+            .position(|&v| v == self.menu_focus)
+            .unwrap_or(0);
+        const DIGITS: [KeyCode; 9] = [
+            KeyCode::Key1,
+            KeyCode::Key2,
+            KeyCode::Key3,
+            KeyCode::Key4,
+            KeyCode::Key5,
+            KeyCode::Key6,
+            KeyCode::Key7,
+            KeyCode::Key8,
+            KeyCode::Key9,
+        ];
+        if let Some(i) = DIGITS[..families].iter().position(|&k| is_key_pressed(k)) {
+            self.menu_focus = self.preferred(i);
+        }
+        if is_key_pressed(KeyCode::Down) {
+            self.menu_focus = self.preferred((family + 1) % families);
+        }
+        if is_key_pressed(KeyCode::Up) {
+            self.menu_focus = self.preferred((family + families - 1) % families);
+        }
+        if is_key_pressed(KeyCode::Right) {
+            self.menu_focus = options[(option + 1) % options.len()];
+        }
+        if is_key_pressed(KeyCode::Left) {
+            self.menu_focus = options[(option + options.len() - 1) % options.len()];
+        }
     }
 
     /// Shows an overlay or hint by name ("help", "stats", "games", "hint",
@@ -382,7 +444,13 @@ impl App {
                 self.animated(layout, |app| app.game.move_cards(sel, 1, pile));
                 self.player_acted();
             }
-            _ => self.selected = Some(pile),
+            Some(sel) => {
+                if let Some(reason) = self.game.refusal(sel, 1, pile) {
+                    self.show_toast(reason);
+                }
+                self.selected = Some(pile);
+            }
+            None => self.selected = Some(pile),
         }
     }
 
@@ -467,31 +535,23 @@ impl App {
             };
         }
         if self.overlay == Overlay::Games {
-            // N again (or Enter) deals another game of the current kind.
-            if is_key_pressed(KeyCode::N) || is_key_pressed(KeyCode::Enter) {
+            // N again deals another game of the current kind.
+            if is_key_pressed(KeyCode::N) {
                 self.choose_variant(self.game.variant());
                 return;
             }
-            const DIGITS: [KeyCode; Variant::ALL.len()] = [
-                KeyCode::Key1,
-                KeyCode::Key2,
-                KeyCode::Key3,
-                KeyCode::Key4,
-                KeyCode::Key5,
-                KeyCode::Key6,
-                KeyCode::Key7,
-            ];
-            if let Some(i) = DIGITS.iter().position(|&k| is_key_pressed(k)) {
-                self.choose_variant(Variant::ALL[i]);
+            if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+                self.choose_variant(self.menu_focus);
                 return;
             }
+            self.menu_keys();
         }
         if self.overlay != Overlay::None {
             return;
         }
 
         if is_key_pressed(KeyCode::N) {
-            self.overlay = Overlay::Games;
+            self.open_game_chooser();
             return;
         }
         if is_key_pressed(KeyCode::F2) {
@@ -549,15 +609,26 @@ impl App {
         let now = get_time();
         self.handle_keys(layout);
 
-        if self.overlay != Overlay::None {
+        if self.overlay == Overlay::Games {
+            let menu = GamesMenu::compute();
+            let hovered = menu.chip_at(mouse);
+            if mouse != self.last_mouse
+                && let Some(v) = hovered
+            {
+                self.menu_focus = v;
+            }
             if is_mouse_button_pressed(MouseButton::Left) {
-                let picked = (self.overlay == Overlay::Games)
-                    .then(|| games_menu().1.iter().position(|r| r.contains(mouse)))
-                    .flatten();
-                match picked {
-                    Some(i) => self.choose_variant(Variant::ALL[i]),
-                    None => self.overlay = Overlay::None,
+                if let Some(v) = hovered {
+                    self.choose_variant(v);
+                } else if let Some(f) = menu.rows.iter().position(|r| r.contains(mouse)) {
+                    self.menu_focus = self.preferred(f);
+                } else if !menu.panel.contains(mouse) {
+                    self.overlay = Overlay::None;
                 }
+            }
+        } else if self.overlay != Overlay::None {
+            if is_mouse_button_pressed(MouseButton::Left) {
+                self.overlay = Overlay::None;
             }
         } else if !self.autoplay {
             if is_mouse_button_pressed(MouseButton::Left) {
@@ -618,6 +689,7 @@ impl App {
         if self.played && !self.game.is_won() {
             self.elapsed += get_frame_time();
         }
+        self.last_mouse = mouse;
     }
 
     pub fn draw(&self, layout: &Layout) {
@@ -649,7 +721,10 @@ impl App {
             let slot = layout.rect_at(layout.slot(pile));
             let label = slot_label(self.game.variant(), pile);
             render::draw_slot(slot, label);
-            let recycles = matches!(self.game.variant(), Variant::Klondike(_) | Variant::Cairn);
+            let recycles = matches!(
+                self.game.variant(),
+                Variant::Klondike(_) | Variant::Cairn(_)
+            );
             if pile == PileId::Stock
                 && recycles
                 && !self.game.pile(PileId::Waste).is_empty()
@@ -753,10 +828,12 @@ impl App {
             let skip = match pile {
                 PileId::Foundation(_) | PileId::Cell(_) => resting.len().saturating_sub(2),
                 // Spider's stock is fanned by deal, so every card shows.
-                PileId::Stock if matches!(variant, Variant::Klondike(_) | Variant::Cairn) => {
+                PileId::Stock if matches!(variant, Variant::Klondike(_) | Variant::Cairn(_)) => {
                     resting.len().saturating_sub(2)
                 }
-                PileId::Waste if variant == Variant::Cairn => resting.len().saturating_sub(2),
+                PileId::Waste if matches!(variant, Variant::Cairn(_)) => {
+                    resting.len().saturating_sub(2)
+                }
                 _ => 0,
             };
             for &card in &resting[skip..] {
@@ -945,77 +1022,181 @@ impl App {
     }
 
     fn draw_games(&self) {
-        let (panel, rows) = games_menu();
-        let r = ui::panel(panel.w, panel.h);
+        let menu = GamesMenu::compute();
+        let r = ui::panel(menu.panel.w, menu.panel.h);
         let left = r.x + 28.0;
         let current = self.game.variant();
+        let focus = self.menu_focus;
         render::text("New game", left, r.y + 56.0, 28.0, ui::FG);
-        let sub = format!(
-            "Pick a game, or press N again for another {}.",
-            current.name()
-        );
+        let sub = format!("Press N again for another {}.", current.name());
         render::text(&sub, left, r.y + 84.0, 14.0, ui::DIM);
 
-        let mouse: Vec2 = mouse_position().into();
-        for (i, (variant, row)) in Variant::ALL.iter().zip(&rows).enumerate() {
-            let is_current = *variant == current;
-            if is_current {
-                render::rounded_rect(*row, 10.0, render::alpha(ui::ACCENT, 0.10));
-            } else if row.contains(mouse) {
+        for (f, (family, row)) in Variant::FAMILIES.iter().zip(&menu.rows).enumerate() {
+            let focused = focus.family() == f;
+            if focused {
                 render::rounded_rect(*row, 10.0, render::alpha(ui::FG, 0.06));
             }
             let cy = row.center().y;
-            let color = if is_current { ui::ACCENT } else { ui::FG };
-            ui::keycap(&(i + 1).to_string(), row.x + 12.0, cy, ui::FG);
-            let animal = match variant {
-                Variant::Klondike(_) => Animal::Fox,
-                Variant::Spider(_) => Animal::Spider,
-                Variant::FreeCell => Animal::Swallow,
-                Variant::Cairn => Animal::Hare,
-            };
+            let color = if focused { ui::FG } else { ui::DIM };
+            ui::keycap(&(f + 1).to_string(), row.x + 12.0, cy, ui::FG);
             art::draw_icon(
-                animal,
+                family_animal(f),
                 Rect::new(row.x + 50.0, cy - 13.0, 26.0, 26.0),
                 1.6,
                 color,
             );
-            let baseline = ui::baseline_for(cy, 17.0);
-            render::text(variant.name(), row.x + 92.0, baseline, 17.0, color);
-
-            let stats = self.stats.mode(*variant);
-            let summary = match stats.win_rate() {
-                Some(rate) => format!("{} played · {:.0}% won", stats.played, rate * 100.0),
-                None => "not played yet".to_owned(),
-            };
-            let mut right = row.x + row.w - 12.0;
-            if is_current {
-                right -= ui::keycap("N", right - 22.0, cy, ui::ACCENT) + 14.0;
-            }
-            ui::right_text(&summary, right, ui::baseline_for(cy, 13.0), 13.0, ui::DIM);
+            render::text(
+                family.name,
+                row.x + 92.0,
+                ui::baseline_for(cy, 17.0),
+                17.0,
+                color,
+            );
         }
-        let footer = format!(
-            "1–{} or click to choose   ·   N  same game   ·   Esc  keep this deal",
-            Variant::ALL.len()
-        );
-        ui::centered_text(&footer, r.x + r.w / 2.0, r.y + r.h - 24.0, 13.0, ui::DIM);
+
+        for &(variant, chip) in &menu.chips {
+            let (fill, edge, text) = if variant == focus {
+                (render::alpha(ui::ACCENT, 0.18), ui::ACCENT, ui::ACCENT)
+            } else {
+                (
+                    render::alpha(ui::FG, 0.03),
+                    render::alpha(ui::FG, 0.16),
+                    ui::FG,
+                )
+            };
+            render::rounded_rect(chip, 8.0, fill);
+            render::rounded_rect_lines(chip, 8.0, 1.0, edge);
+            let baseline = ui::baseline_for(chip.center().y, CHIP_TEXT);
+            ui::centered_text(
+                variant.option_name(),
+                chip.center().x,
+                baseline,
+                CHIP_TEXT,
+                text,
+            );
+            // A dot marks the game on the table.
+            if variant == current {
+                draw_circle(chip.x + chip.w - 9.0, chip.y + 9.0, 3.0, ui::ACCENT);
+            }
+        }
+
+        // What the highlighted choice is, and how it has gone so far.
+        let y = menu.detail_y;
+        render::text(focus.name(), left, y + 20.0, 18.0, ui::FG);
+        render::text(variant_blurb(focus), left, y + 46.0, 14.0, ui::DIM);
+        let stats = self.stats.mode(focus);
+        let summary = match stats.win_rate() {
+            Some(rate) => {
+                let mut s = format!("{} played  ·  {:.0}% won", stats.played, rate * 100.0);
+                if let Some(t) = stats.best_time_secs {
+                    s += &format!("  ·  best {}", format_time(t));
+                }
+                s
+            }
+            None => "Not played yet".to_owned(),
+        };
+        render::text(&summary, left, y + 70.0, 14.0, ui::DIM);
+
+        let hints = [
+            ("↑↓", "game"),
+            ("‹ ›", "variant"),
+            ("Enter", "play"),
+            ("N", "same again"),
+            ("Esc", "keep deal"),
+        ];
+        let w = ui::key_hints_width(&hints);
+        ui::key_hints(&hints, r.x + (r.w - w) / 2.0, r.y + r.h - 30.0);
     }
 }
 
-/// Panel and row rectangles of the game chooser, shared by drawing and
-/// clicking.
-fn games_menu() -> (Rect, Vec<Rect>) {
-    let row_h = 60.0;
-    let (w, h) = (600.0f32, 166.0 + Variant::ALL.len() as f32 * row_h);
-    let (sw, sh) = (screen_width(), screen_height());
-    let (w, h) = (w.min(sw), h.min(sh));
-    let panel = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
-    let rows = (0..Variant::ALL.len())
-        .map(|i| {
-            let y = panel.y + 106.0 + i as f32 * row_h;
-            Rect::new(panel.x + 16.0, y, panel.w - 32.0, row_h - 4.0)
-        })
-        .collect();
-    (panel, rows)
+const CHIP_TEXT: f32 = 15.0;
+
+/// Geometry of the game chooser, shared by drawing and clicking: one row
+/// per game, with a chip for each way to play it.
+struct GamesMenu {
+    panel: Rect,
+    rows: Vec<Rect>,
+    chips: Vec<(Variant, Rect)>,
+    /// Top of the description of the highlighted choice.
+    detail_y: f32,
+}
+
+impl GamesMenu {
+    fn compute() -> Self {
+        let row_h = 58.0;
+        let n = Variant::FAMILIES.len() as f32;
+        let (w, h) = (640.0f32, 106.0 + n * row_h + 150.0);
+        let (sw, sh) = (screen_width(), screen_height());
+        let (w, h) = (w.min(sw), h.min(sh));
+        let panel = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
+        let mut rows = Vec::new();
+        let mut chips = Vec::new();
+        for (f, family) in Variant::FAMILIES.iter().enumerate() {
+            let y = panel.y + 106.0 + f as f32 * row_h;
+            let row = Rect::new(panel.x + 16.0, y, panel.w - 32.0, row_h - 6.0);
+            rows.push(row);
+            let chip_h = 32.0;
+            let mut x = row.x + 220.0;
+            for &variant in family.variants {
+                let cw = render::measure(variant.option_name(), CHIP_TEXT).width + 32.0;
+                let cw = cw.max(84.0);
+                chips.push((
+                    variant,
+                    Rect::new(x, row.center().y - chip_h / 2.0, cw, chip_h),
+                ));
+                x += cw + 8.0;
+            }
+        }
+        let detail_y = panel.y + 106.0 + n * row_h + 12.0;
+        GamesMenu {
+            panel,
+            rows,
+            chips,
+            detail_y,
+        }
+    }
+
+    fn chip_at(&self, p: Vec2) -> Option<Variant> {
+        self.chips
+            .iter()
+            .find(|(_, r)| r.contains(p))
+            .map(|&(v, _)| v)
+    }
+}
+
+fn family_animal(family: usize) -> Animal {
+    match Variant::FAMILIES[family].default {
+        Variant::Klondike(_) => Animal::Fox,
+        Variant::Spider(_) => Animal::Spider,
+        Variant::FreeCell => Animal::Swallow,
+        Variant::Cairn(_) => Animal::Hare,
+    }
+}
+
+/// One line on how a variant plays.
+fn variant_blurb(variant: Variant) -> &'static str {
+    use soli_core::{CairnLevel, DrawMode, SpiderSuits};
+    match variant {
+        Variant::Klondike(DrawMode::One) => {
+            "Turn one card at a time, through the stock as often as you like."
+        }
+        Variant::Klondike(DrawMode::Three) => "Turn three cards at a time; only the top one plays.",
+        Variant::Spider(SpiderSuits::One) => "All spades. The gentlest Spider.",
+        Variant::Spider(SpiderSuits::Two) => {
+            "Spades and hearts. Runs must keep to one suit to clear."
+        }
+        Variant::Spider(SpiderSuits::Four) => "Every suit. The hardest Spider.",
+        Variant::FreeCell => "Every card face up, four free cells. Almost every deal can be won.",
+        Variant::Cairn(CairnLevel::Easy) => {
+            "Pair by rank. Three passes through the stock and a reserve."
+        }
+        Variant::Cairn(CairnLevel::Normal) => {
+            "Pair by rank and colour; a card needs an open side. Two passes and a reserve."
+        }
+        Variant::Cairn(CairnLevel::Hard) => {
+            "Pair by rank and colour; a card needs an open side. One pass, no reserve."
+        }
+    }
 }
 
 /// Placeholder letter shown in an empty pile, where the variant has a rule
@@ -1038,7 +1219,7 @@ fn draw_help() {
         ("Ctrl+Z", "Undo"),
         ("A", "Auto-finish when possible"),
         ("M", "Toggle auto-move to foundations"),
-        ("N  /  N N", "Choose game  /  New deal, same game"),
+        ("N  /  N N", "Choose game  /  Same game again"),
         ("F2  /  R", "New deal  /  Restart deal"),
         ("T", "Change table colour"),
         ("B", "Change card back"),

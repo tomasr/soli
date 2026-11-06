@@ -63,22 +63,73 @@ pub enum SpiderSuits {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CairnLevel {
+    Easy,
+    Normal,
+    Hard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
     Klondike(DrawMode),
     Spider(SpiderSuits),
     FreeCell,
-    Cairn,
+    Cairn(CairnLevel),
+}
+
+/// A game and the ways it can be played, as offered in the game chooser.
+pub struct Family {
+    pub name: &'static str,
+    pub variants: &'static [Variant],
+    /// Offered first when the player hasn't played this game yet.
+    pub default: Variant,
 }
 
 impl Variant {
-    pub const ALL: [Variant; 7] = [
+    pub const ALL: [Variant; 9] = [
         Variant::Klondike(DrawMode::One),
         Variant::Klondike(DrawMode::Three),
         Variant::Spider(SpiderSuits::One),
         Variant::Spider(SpiderSuits::Two),
         Variant::Spider(SpiderSuits::Four),
         Variant::FreeCell,
-        Variant::Cairn,
+        Variant::Cairn(CairnLevel::Easy),
+        Variant::Cairn(CairnLevel::Normal),
+        Variant::Cairn(CairnLevel::Hard),
+    ];
+
+    pub const FAMILIES: [Family; 4] = [
+        Family {
+            name: "Klondike",
+            variants: &[
+                Variant::Klondike(DrawMode::One),
+                Variant::Klondike(DrawMode::Three),
+            ],
+            default: Variant::Klondike(DrawMode::One),
+        },
+        Family {
+            name: "Spider",
+            variants: &[
+                Variant::Spider(SpiderSuits::One),
+                Variant::Spider(SpiderSuits::Two),
+                Variant::Spider(SpiderSuits::Four),
+            ],
+            default: Variant::Spider(SpiderSuits::One),
+        },
+        Family {
+            name: "FreeCell",
+            variants: &[Variant::FreeCell],
+            default: Variant::FreeCell,
+        },
+        Family {
+            name: "Cairn",
+            variants: &[
+                Variant::Cairn(CairnLevel::Easy),
+                Variant::Cairn(CairnLevel::Normal),
+                Variant::Cairn(CairnLevel::Hard),
+            ],
+            default: Variant::Cairn(CairnLevel::Normal),
+        },
     ];
 
     /// Stable identifier, used in settings and statistics files.
@@ -90,12 +141,38 @@ impl Variant {
             Variant::Spider(SpiderSuits::Two) => "spider-2suits",
             Variant::Spider(SpiderSuits::Four) => "spider-4suits",
             Variant::FreeCell => "freecell",
-            Variant::Cairn => "cairn",
+            // Cairn's first version had no levels; its rules are Easy's.
+            Variant::Cairn(CairnLevel::Easy) => "cairn",
+            Variant::Cairn(CairnLevel::Normal) => "cairn-normal",
+            Variant::Cairn(CairnLevel::Hard) => "cairn-hard",
         }
     }
 
     pub fn from_key(key: &str) -> Option<Variant> {
         Variant::ALL.into_iter().find(|v| v.key() == key)
+    }
+
+    /// Index into [`Variant::FAMILIES`].
+    pub fn family(self) -> usize {
+        Variant::FAMILIES
+            .iter()
+            .position(|f| f.variants.contains(&self))
+            .expect("every variant belongs to a family")
+    }
+
+    /// How this variant differs from the others in its family.
+    pub fn option_name(self) -> &'static str {
+        match self {
+            Variant::Klondike(DrawMode::One) => "Draw 1",
+            Variant::Klondike(DrawMode::Three) => "Draw 3",
+            Variant::Spider(SpiderSuits::One) => "1 suit",
+            Variant::Spider(SpiderSuits::Two) => "2 suits",
+            Variant::Spider(SpiderSuits::Four) => "4 suits",
+            Variant::FreeCell => "Classic",
+            Variant::Cairn(CairnLevel::Easy) => "Easy",
+            Variant::Cairn(CairnLevel::Normal) => "Normal",
+            Variant::Cairn(CairnLevel::Hard) => "Hard",
+        }
     }
 
     pub fn name(self) -> &'static str {
@@ -106,7 +183,9 @@ impl Variant {
             Variant::Spider(SpiderSuits::Two) => "Spider · 2 suits",
             Variant::Spider(SpiderSuits::Four) => "Spider · 4 suits",
             Variant::FreeCell => "FreeCell",
-            Variant::Cairn => "Cairn",
+            Variant::Cairn(CairnLevel::Easy) => "Cairn · Easy",
+            Variant::Cairn(CairnLevel::Normal) => "Cairn · Normal",
+            Variant::Cairn(CairnLevel::Hard) => "Cairn · Hard",
         }
     }
 
@@ -115,7 +194,7 @@ impl Variant {
             Variant::Klondike(mode) => Box::new(Klondike::new(seed, mode)),
             Variant::Spider(suits) => Box::new(Spider::new(seed, suits)),
             Variant::FreeCell => Box::new(FreeCell::new(seed)),
-            Variant::Cairn => Box::new(Cairn::new(seed)),
+            Variant::Cairn(level) => Box::new(Cairn::new(seed, level)),
         }
     }
 }
@@ -161,6 +240,12 @@ pub trait Game {
 
     /// A player move. Returns false (and changes nothing) if it is illegal.
     fn move_cards(&mut self, from: PileId, count: usize, to: PileId) -> bool;
+
+    /// Why moving `count` cards from `from` to `to` is refused, when the
+    /// reason may not be obvious to the player.
+    fn refusal(&self, _from: PileId, _count: usize, _to: PileId) -> Option<&'static str> {
+        None
+    }
 
     /// Clicking the stock. Returns false if nothing happened.
     fn click_stock(&mut self) -> bool {

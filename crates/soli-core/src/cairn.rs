@@ -1,15 +1,19 @@
 //! Cairn: two decks, 104 cards. Most are dealt face up into an overlapping
 //! layout; the rest form a stock drawn one card at a time onto a waste pile.
 //! A card is free when no card above it overlaps it. Two free cards of the
-//! same rank are removed as a pair; the top waste card and the reserve card
-//! count as free. The reserve holds one card set aside. The stock may be gone
-//! through three times. Clearing the layout wins.
+//! same kind are removed as a pair; the top waste card and the reserve card
+//! count as free. Clearing the layout wins.
+//!
+//! The level sets the rest (see [`Rules::for_level`]): whether a pair must
+//! share colour as well as rank, whether a layout card also needs an open
+//! side as in Mahjong, how many passes through the stock are allowed, and
+//! whether there is a one-card reserve.
 //!
 //! Every deal is built backwards from a solution (see [`generate`]), so every
 //! deal can be won.
 
 use crate::card::{Card, Color, Suit};
-use crate::game::{Game, Hint, History, PileId, SlotPos, Variant};
+use crate::game::{CairnLevel, Game, Hint, History, PileId, SlotPos, Variant};
 use crate::rng::SplitMix64;
 
 const DEALS: u64 = 1_000_000;
@@ -50,6 +54,25 @@ impl Default for Rules {
 }
 
 impl Rules {
+    pub fn for_level(level: CairnLevel) -> Self {
+        match level {
+            CairnLevel::Easy => Rules::default(),
+            CairnLevel::Normal => Rules {
+                same_colour: true,
+                open_side: true,
+                passes: 2,
+                ..Rules::default()
+            },
+            CairnLevel::Hard => Rules {
+                same_colour: true,
+                open_side: true,
+                passes: 1,
+                reserve: false,
+                ..Rules::default()
+            },
+        }
+    }
+
     /// Cards with the same kind pair up.
     fn kind(&self, card: Card) -> (u8, Option<Color>) {
         (card.rank, self.same_colour.then(|| card.color()))
@@ -110,24 +133,14 @@ fn heart() -> Shape {
     stacked_rows("Heart", rows)
 }
 
-fn fans() -> Shape {
-    // Four rows of three fans; each fan is six cards overlapping to the right.
-    let mut slots = Vec::new();
-    for r in 0..4 {
-        for f in 0..3 {
-            for i in 0..6 {
-                slots.push(pos(f * 8 + i, r * 2, i));
-            }
-        }
-    }
-    Shape {
-        name: "Fans",
-        slots,
-    }
+fn hive() -> Shape {
+    // Rows widening from 6 to 11, then narrowing to 9: 70 cards.
+    let widths = [6, 7, 8, 9, 10, 11, 10, 9];
+    stacked_rows("Hive", widths.into_iter().map(|n| row(11 - n, n)).collect())
 }
 
 pub fn shapes() -> Vec<Shape> {
-    vec![peak(), heart(), fans()]
+    vec![peak(), heart(), hive()]
 }
 
 /// `upper` lies over `lower`.
@@ -377,6 +390,7 @@ pub struct Cairn {
     board: Board,
     history: History<Board>,
     deal: u64,
+    level: CairnLevel,
     shape: Shape,
     geo: Geometry,
     rules: Rules,
@@ -386,11 +400,11 @@ pub struct Cairn {
 
 impl Cairn {
     /// Any seed maps onto deals 1..=1,000,000; a deal number maps to itself.
-    pub fn new(seed: u64) -> Self {
-        Self::with_rules(seed, Rules::default())
+    pub fn new(seed: u64, level: CairnLevel) -> Self {
+        Self::with_rules(seed, level, Rules::for_level(level))
     }
 
-    pub fn with_rules(seed: u64, rules: Rules) -> Self {
+    fn with_rules(seed: u64, level: CairnLevel, rules: Rules) -> Self {
         let deal = seed.wrapping_sub(1) % DEALS + 1;
         let d = generate(deal, &rules);
         let shape = shapes().swap_remove(d.shape);
@@ -407,6 +421,7 @@ impl Cairn {
             },
             history: History::new(),
             deal,
+            level,
             shape,
             geo,
             rules,
@@ -492,7 +507,7 @@ impl Cairn {
 
 impl Game for Cairn {
     fn variant(&self) -> Variant {
-        Variant::Cairn
+        Variant::Cairn(self.level)
     }
 
     fn seed(&self) -> u64 {
@@ -508,8 +523,10 @@ impl Game for Cairn {
     }
 
     fn piles(&self) -> Vec<PileId> {
-        [PileId::Stock, PileId::Waste, RESERVE, MATCHED]
+        [PileId::Stock, PileId::Waste]
             .into_iter()
+            .chain(self.rules.reserve.then_some(RESERVE))
+            .chain([MATCHED])
             .chain(self.slot_ids())
             .collect()
     }
@@ -554,6 +571,12 @@ impl Game for Cairn {
 
     fn move_cards(&mut self, from: PileId, count: usize, to: PileId) -> bool {
         count == 1 && self.apply_move(from, to, false)
+    }
+
+    fn refusal(&self, from: PileId, _count: usize, to: PileId) -> Option<&'static str> {
+        let (a, b) = (self.free_card(from)?, self.free_card(to)?);
+        (from != to && a.rank == b.rank && a.color() != b.color())
+            .then_some("Pairs must be the same colour")
     }
 
     fn click_stock(&mut self) -> bool {
@@ -805,7 +828,7 @@ mod tests {
         for rules in rule_sets() {
             let mut shapes_seen = [false; 3];
             for seed in 1..=150 {
-                let mut g = Cairn::with_rules(seed, rules);
+                let mut g = Cairn::with_rules(seed, CairnLevel::Easy, rules);
                 shapes_seen[shapes()
                     .iter()
                     .position(|s| s.name == g.shape_name())
@@ -890,16 +913,8 @@ mod tests {
     #[test]
     #[ignore]
     fn difficulty() {
-        let mut configs = Vec::new();
-        for rules in rule_sets() {
-            for (passes, reserve) in [(3, true), (2, true), (1, true), (1, false)] {
-                configs.push(Rules {
-                    passes,
-                    reserve,
-                    ..rules
-                });
-            }
-        }
+        let configs =
+            [CairnLevel::Easy, CairnLevel::Normal, CairnLevel::Hard].map(Rules::for_level);
         const DEALS_PER: u64 = 300;
         println!(
             "colour side passes reserve |  greedy  random  srch200 srch5000 | per shape (greedy)"
@@ -910,7 +925,7 @@ mod tests {
             let mut searched = [0; 2];
             let mut by_shape = [(0, 0); 3];
             for seed in 1..=DEALS_PER {
-                let mut g = Cairn::with_rules(seed, rules);
+                let mut g = Cairn::with_rules(seed, CairnLevel::Easy, rules);
                 let shape = shapes()
                     .iter()
                     .position(|s| s.name == g.shape_name())
@@ -920,12 +935,12 @@ mod tests {
                     greedy += 1;
                     by_shape[shape].0 += 1;
                 }
-                let mut g = Cairn::with_rules(seed, rules);
+                let mut g = Cairn::with_rules(seed, CairnLevel::Easy, rules);
                 if autoplay(&mut g, false, &mut rng) {
                     random += 1;
                 }
                 for (k, budget) in [200, 5000].into_iter().enumerate() {
-                    let mut g = Cairn::with_rules(seed, rules);
+                    let mut g = Cairn::with_rules(seed, CairnLevel::Easy, rules);
                     let mut left = budget;
                     if search(&mut g, &mut left, &mut Default::default()) {
                         searched[k] += 1;
@@ -955,16 +970,16 @@ mod tests {
 
     #[test]
     fn deals_are_reproducible() {
-        let a = Cairn::new(42);
-        let b = Cairn::new(42);
+        let a = Cairn::new(42, CairnLevel::Easy);
+        let b = Cairn::new(42, CairnLevel::Easy);
         assert_eq!(a.board.slots, b.board.slots);
         assert_eq!(a.board.stock, b.board.stock);
-        assert_eq!(Cairn::new(DEALS + 42).deal_number(), 42);
+        assert_eq!(Cairn::new(DEALS + 42, CairnLevel::Easy).deal_number(), 42);
     }
 
     /// A tiny board: slot 1 lies over slot 0.
     fn small_game() -> Cairn {
-        let mut g = Cairn::new(1);
+        let mut g = Cairn::new(1, CairnLevel::Easy);
         g.shape = Shape {
             name: "test",
             slots: vec![pos(0, 0, 0), pos(1, 1, 1), pos(6, 0, 0), pos(10, 0, 0)],
@@ -983,6 +998,25 @@ mod tests {
             c.face_up = false;
         }
         g
+    }
+
+    #[test]
+    fn colour_rule_explains_itself() {
+        let mut g = small_game();
+        g.rules.same_colour = true;
+        g.board.slots[2] = Some(Card::new(7, Suit::Spades).turned_up());
+        let s = PileId::Slot;
+        assert!(!g.can_move(s(1), 1, s(2)));
+        assert_eq!(
+            g.refusal(s(1), 1, s(2)),
+            Some("Pairs must be the same colour")
+        );
+        assert_eq!(
+            g.refusal(s(1), 1, s(3)),
+            None,
+            "different rank needs no reason"
+        );
+        assert!(!g.can_move(s(3), 1, s(3)));
     }
 
     #[test]

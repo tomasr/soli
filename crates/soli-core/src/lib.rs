@@ -10,4 +10,4 @@ pub mod rng;
 pub mod spider;
 
 pub use card::{Card, Color, Suit};
-pub use game::{DrawMode, Game, Hint, PileId, SlotPos, SpiderSuits, Variant};
+pub use game::{CairnLevel, DrawMode, Family, Game, Hint, PileId, SlotPos, SpiderSuits, Variant};

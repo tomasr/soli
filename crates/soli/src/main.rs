@@ -143,7 +143,7 @@ async fn main() {
             let mut app = App::new(settings, Stats::default(), seed, false);
             // A few stock clicks so the waste (or a Spider deal) shows.
             let clicks = match variant {
-                Variant::Klondike(_) | Variant::Cairn => 3,
+                Variant::Klondike(_) | Variant::Cairn(_) => 3,
                 _ => 0,
             };
             for _ in 0..clicks {
