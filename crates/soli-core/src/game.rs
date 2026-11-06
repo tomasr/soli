@@ -1,6 +1,7 @@
 //! What every solitaire variant has in common, so a front end can drive any of
 //! them through one interface.
 
+use crate::cairn::Cairn;
 use crate::card::Card;
 use crate::freecell::FreeCell;
 use crate::klondike::Klondike;
@@ -12,8 +13,19 @@ pub enum PileId {
     Waste,
     Foundation(usize),
     Tableau(usize),
-    /// FreeCell's free cells.
+    /// FreeCell's free cells; Cairn's reserve.
     Cell(usize),
+    /// A position in Cairn's layout, holding at most one card.
+    Slot(usize),
+}
+
+/// Where a layout slot sits, in half-card units (`x` across, `y` down), and
+/// how high it is stacked: a slot is covered by any higher slot it overlaps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotPos {
+    pub x: i8,
+    pub y: i8,
+    pub z: u8,
 }
 
 /// A suggested next step, as returned by [`Game::hints`].
@@ -55,16 +67,18 @@ pub enum Variant {
     Klondike(DrawMode),
     Spider(SpiderSuits),
     FreeCell,
+    Cairn,
 }
 
 impl Variant {
-    pub const ALL: [Variant; 6] = [
+    pub const ALL: [Variant; 7] = [
         Variant::Klondike(DrawMode::One),
         Variant::Klondike(DrawMode::Three),
         Variant::Spider(SpiderSuits::One),
         Variant::Spider(SpiderSuits::Two),
         Variant::Spider(SpiderSuits::Four),
         Variant::FreeCell,
+        Variant::Cairn,
     ];
 
     /// Stable identifier, used in settings and statistics files.
@@ -76,6 +90,7 @@ impl Variant {
             Variant::Spider(SpiderSuits::Two) => "spider-2suits",
             Variant::Spider(SpiderSuits::Four) => "spider-4suits",
             Variant::FreeCell => "freecell",
+            Variant::Cairn => "cairn",
         }
     }
 
@@ -91,6 +106,7 @@ impl Variant {
             Variant::Spider(SpiderSuits::Two) => "Spider · 2 suits",
             Variant::Spider(SpiderSuits::Four) => "Spider · 4 suits",
             Variant::FreeCell => "FreeCell",
+            Variant::Cairn => "Cairn",
         }
     }
 
@@ -99,6 +115,7 @@ impl Variant {
             Variant::Klondike(mode) => Box::new(Klondike::new(seed, mode)),
             Variant::Spider(suits) => Box::new(Spider::new(seed, suits)),
             Variant::FreeCell => Box::new(FreeCell::new(seed)),
+            Variant::Cairn => Box::new(Cairn::new(seed)),
         }
     }
 }
@@ -121,6 +138,17 @@ pub trait Game {
 
     fn pile(&self, id: PileId) -> &[Card];
 
+    /// Positions of the layout's [`PileId::Slot`] piles, bottom first. Empty
+    /// for games without a layout.
+    fn slots(&self) -> &[SlotPos] {
+        &[]
+    }
+
+    /// Name of this deal's layout, for games that have several.
+    fn layout_name(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Number of waste cards drawn fanned out (Klondike draw-3).
     fn waste_fan(&self) -> usize {
         0
@@ -142,6 +170,12 @@ pub trait Game {
     /// Why clicking the stock would currently do nothing, if there's a reason
     /// worth telling the player.
     fn stock_blocked(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Current pass through the stock and how many are allowed, for games
+    /// that limit them.
+    fn stock_pass(&self) -> Option<(u32, u32)> {
         None
     }
 

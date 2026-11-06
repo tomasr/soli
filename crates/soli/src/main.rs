@@ -33,7 +33,8 @@ const WINDOW_SIZE: (f32, f32) = (1100.0, 760.0);
 enum Mode {
     Play,
     /// Render a fixed deal to a PNG and exit. `--variant <key>` picks the
-    /// game; `--show help|stats|games|hint` adds an overlay.
+    /// game, `--seed <n>` the deal; `--show help|stats|games|hint` adds an
+    /// overlay.
     Screenshot(String),
     /// Render every card face and back to a PNG and exit.
     Gallery(String),
@@ -136,12 +137,14 @@ async fn main() {
                 ..Default::default()
             };
             settings.set_variant(variant);
-            let mut app = App::new(settings, Stats::default(), 12345, false);
+            let seed = value_of("--seed")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(12345);
+            let mut app = App::new(settings, Stats::default(), seed, false);
             // A few stock clicks so the waste (or a Spider deal) shows.
-            let clicks = if matches!(variant, Variant::Klondike(_)) {
-                3
-            } else {
-                0
+            let clicks = match variant {
+                Variant::Klondike(_) | Variant::Cairn => 3,
+                _ => 0,
             };
             for _ in 0..clicks {
                 app.game.click_stock();
@@ -160,7 +163,7 @@ async fn main() {
     let mut frames = 0;
     loop {
         let frame_start = Instant::now();
-        let layout = Layout::compute(screen_width(), screen_height(), app.game.variant());
+        let layout = Layout::compute(screen_width(), screen_height(), app.game.as_ref());
         match &mode {
             Mode::Play => {
                 app.update(&layout);

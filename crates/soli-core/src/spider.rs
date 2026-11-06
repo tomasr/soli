@@ -149,7 +149,7 @@ impl Game for Spider {
             PileId::Stock => &self.board.stock,
             PileId::Foundation(i) => &self.board.foundations[i],
             PileId::Tableau(i) => &self.board.tableau[i],
-            PileId::Waste | PileId::Cell(_) => &[],
+            PileId::Waste | PileId::Cell(_) | PileId::Slot(_) => &[],
         }
     }
 

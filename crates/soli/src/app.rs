@@ -30,6 +30,20 @@ struct Drag {
     count: usize,
     /// Mouse position relative to the top-left of the first dragged card.
     grab: Vec2,
+    /// Where the button went down, to tell a click from a drag.
+    start: Vec2,
+}
+
+/// How far the mouse may move between press and release and still count as
+/// a click.
+const CLICK_SLOP: f32 = 4.0;
+
+/// Shade over layout cards that are covered.
+const COVERED_SHADE: Color = Color::new(0.0, 0.0, 0.0, 0.32);
+
+/// Games where cards are paired by clicking one and then the other.
+fn pairs_by_click(variant: Variant) -> bool {
+    matches!(variant, Variant::Cairn)
 }
 
 #[derive(PartialEq)]
@@ -59,6 +73,8 @@ pub struct App {
     hint: Option<(Hint, f64)>,
     hint_cursor: usize,
     blocked: Option<Blocked>,
+    /// Card picked by a click, waiting for its partner (Cairn).
+    selected: Option<PileId>,
     toast: Option<(String, f64)>,
     overlay: Overlay,
     pub settings: Settings,
@@ -97,6 +113,7 @@ impl App {
             hint: None,
             hint_cursor: 0,
             blocked: None,
+            selected: None,
             toast: None,
             overlay: Overlay::None,
             settings,
@@ -252,14 +269,16 @@ impl App {
         self.played = true;
         self.hint = None;
         self.blocked = None;
+        self.selected = None;
         self.hint_cursor = 0;
         self.auto_pending = self.settings.auto_move;
         self.auto_timer = 0.0;
     }
 
-    /// The pile and card index under the point, if any.
+    /// The pile and card index under the point, if any. Piles drawn later
+    /// lie on top, so they are tried first.
     fn hit_test(&self, layout: &Layout, p: Vec2) -> Option<(PileId, usize)> {
-        for pile in self.game.piles() {
+        for pile in self.game.piles().into_iter().rev() {
             if pile == PileId::Stock {
                 // The whole stock acts as one button, including Spider's
                 // fanned-out deals.
@@ -285,6 +304,19 @@ impl App {
 
     fn handle_press(&mut self, layout: &Layout, mouse: Vec2) {
         let Some((pile, idx)) = self.hit_test(layout, mouse) else {
+            // A click on an empty pile (the reserve) can take the selected
+            // card.
+            if let Some(sel) = self.selected.take() {
+                let to = self.game.piles().into_iter().find(|&to| {
+                    self.game.pile(to).is_empty()
+                        && layout.rect_at(layout.slot(to)).contains(mouse)
+                        && self.game.can_move(sel, 1, to)
+                });
+                if let Some(to) = to {
+                    self.animated(layout, |app| app.game.move_cards(sel, 1, to));
+                    self.player_acted();
+                }
+            }
             return;
         };
         if pile == PileId::Stock {
@@ -298,6 +330,11 @@ impl App {
         let cards = self.game.pile(pile);
         let count = cards.len() - idx;
         if !self.game.can_pick_up(pile, count) {
+            if pairs_by_click(self.game.variant()) {
+                // Covered: the shading already says why.
+                self.selected = None;
+                return;
+            }
             if cards[idx].face_up {
                 let movable = (1..count)
                     .rev()
@@ -332,7 +369,21 @@ impl App {
             from: pile,
             count,
             grab: mouse - drawn,
+            start: mouse,
         });
+    }
+
+    /// A click on a playable card in a pairing game: select it, or pair it
+    /// with the card already selected.
+    fn click_card(&mut self, layout: &Layout, pile: PileId) {
+        match self.selected {
+            Some(sel) if sel == pile => self.selected = None,
+            Some(sel) if self.game.can_move(sel, 1, pile) => {
+                self.animated(layout, |app| app.game.move_cards(sel, 1, pile));
+                self.player_acted();
+            }
+            _ => self.selected = Some(pile),
+        }
     }
 
     /// Legal drop target overlapping the dragged cards the most.
@@ -364,7 +415,13 @@ impl App {
         let Some(drag) = &self.drag else {
             return;
         };
-        let target = self.drop_target(layout, drag, mouse);
+        let clicked =
+            pairs_by_click(self.game.variant()) && mouse.distance(drag.start) < CLICK_SLOP;
+        let target = if clicked {
+            None
+        } else {
+            self.drop_target(layout, drag, mouse)
+        };
         let (from, count) = (drag.from, drag.count);
         // Either way the cards glide from the cursor: to the new pile, or back.
         let moved = self.animated(layout, |app| {
@@ -373,6 +430,8 @@ impl App {
         });
         if moved {
             self.player_acted();
+        } else if clicked {
+            self.click_card(layout, from);
         }
     }
 
@@ -413,13 +472,14 @@ impl App {
                 self.choose_variant(self.game.variant());
                 return;
             }
-            const DIGITS: [KeyCode; 6] = [
+            const DIGITS: [KeyCode; Variant::ALL.len()] = [
                 KeyCode::Key1,
                 KeyCode::Key2,
                 KeyCode::Key3,
                 KeyCode::Key4,
                 KeyCode::Key5,
                 KeyCode::Key6,
+                KeyCode::Key7,
             ];
             if let Some(i) = DIGITS.iter().position(|&k| is_key_pressed(k)) {
                 self.choose_variant(Variant::ALL[i]);
@@ -474,6 +534,7 @@ impl App {
                 app.auto_pending = false;
                 app.hint = None;
                 app.blocked = None;
+                app.selected = None;
                 app.game.undo();
             });
         }
@@ -581,12 +642,33 @@ impl App {
         };
 
         for pile in self.game.piles() {
+            // A cleared layout slot leaves no outline behind.
+            if matches!(pile, PileId::Slot(_)) {
+                continue;
+            }
             let slot = layout.rect_at(layout.slot(pile));
             let label = slot_label(self.game.variant(), pile);
             render::draw_slot(slot, label);
-            let klondike = matches!(self.game.variant(), Variant::Klondike(_));
-            if pile == PileId::Stock && klondike && !self.game.pile(PileId::Waste).is_empty() {
+            let recycles = matches!(self.game.variant(), Variant::Klondike(_) | Variant::Cairn);
+            if pile == PileId::Stock
+                && recycles
+                && !self.game.pile(PileId::Waste).is_empty()
+                && self.game.stock_blocked().is_none()
+            {
                 render::draw_recycle_mark(slot);
+            }
+        }
+
+        // Layout cards overlap, so a glow drawn under everything would be
+        // hidden by neighbours; theirs is drawn just before the card itself.
+        let mut slot_glows: Vec<(PileId, Color)> = Vec::new();
+        if let Some(sel) = self.selected
+            && self.game.can_pick_up(sel, 1)
+        {
+            if matches!(sel, PileId::Slot(_)) {
+                slot_glows.push((sel, render::OCHRE));
+            } else {
+                render::draw_outline(top_rect(sel), render::OCHRE);
             }
         }
 
@@ -597,7 +679,11 @@ impl App {
             .as_ref()
             .and_then(|d| self.drop_target(layout, d, mouse))
         {
-            render::draw_outline(top_rect(target), render::HIGHLIGHT);
+            if matches!(target, PileId::Slot(_)) {
+                slot_glows.push((target, render::HIGHLIGHT));
+            } else {
+                render::draw_outline(top_rect(target), render::HIGHLIGHT);
+            }
         }
         if let Some((hint, shown)) = self.hint {
             let pulse = 0.65 + 0.35 * ((now - shown) * 6.0).cos() as f32;
@@ -606,6 +692,14 @@ impl App {
                 ..render::HINT
             };
             match hint {
+                Hint::Move { from, to, .. } if matches!(from, PileId::Slot(_)) => {
+                    slot_glows.push((from, color));
+                    if matches!(to, PileId::Slot(_)) {
+                        slot_glows.push((to, color));
+                    } else {
+                        render::draw_outline(top_rect(to), color);
+                    }
+                }
                 Hint::Move { from, count, to } => {
                     let cards = self.game.pile(from);
                     let run = &cards[cards.len() - count..];
@@ -655,16 +749,24 @@ impl App {
                 visible.iter().partition(|&&c| !self.anim.is_flying(key(c)));
             flying.extend(moving);
             // Stacked piles only need their top two resting cards drawn.
+            let variant = self.game.variant();
             let skip = match pile {
                 PileId::Foundation(_) | PileId::Cell(_) => resting.len().saturating_sub(2),
                 // Spider's stock is fanned by deal, so every card shows.
-                PileId::Stock if matches!(self.game.variant(), Variant::Klondike(_)) => {
+                PileId::Stock if matches!(variant, Variant::Klondike(_) | Variant::Cairn) => {
                     resting.len().saturating_sub(2)
                 }
+                PileId::Waste if variant == Variant::Cairn => resting.len().saturating_sub(2),
                 _ => 0,
             };
             for &card in &resting[skip..] {
+                if let Some(&(_, color)) = slot_glows.iter().find(|(p, _)| *p == pile) {
+                    render::draw_outline(rect(card), color);
+                }
                 render::draw_card(card, rect(card), back);
+                if matches!(pile, PileId::Slot(_)) && !self.game.can_pick_up(pile, 1) {
+                    render::rounded_rect(rect(card), rect(card).w * 0.08, COVERED_SHADE);
+                }
             }
         }
         for card in flying {
@@ -720,13 +822,20 @@ impl App {
         let pad = 20.0;
 
         let mut x = pad;
-        render::text(self.game.variant().name(), x, baseline, size, ui::FG);
-        x += render::measure(self.game.variant().name(), size).width + 28.0;
-        let fields = [
+        let name = match self.game.layout_name() {
+            Some(layout) => format!("{} · {layout}", self.game.variant().name()),
+            None => self.game.variant().name().to_owned(),
+        };
+        render::text(&name, x, baseline, size, ui::FG);
+        x += render::measure(&name, size).width + 28.0;
+        let mut fields = vec![
             ("Moves", self.game.moves().to_string()),
             ("Time", format_time(self.elapsed as u32)),
             ("Deal", format!("#{}", self.game.deal_number())),
         ];
+        if let Some((pass, passes)) = self.game.stock_pass() {
+            fields.push(("Pass", format!("{pass}/{passes}")));
+        }
         for (label, value) in fields {
             render::text(label, x, baseline, size, ui::DIM);
             x += render::measure(label, size).width + 6.0;
@@ -862,6 +971,7 @@ impl App {
                 Variant::Klondike(_) => Animal::Fox,
                 Variant::Spider(_) => Animal::Spider,
                 Variant::FreeCell => Animal::Swallow,
+                Variant::Cairn => Animal::Hare,
             };
             art::draw_icon(
                 animal,
@@ -883,8 +993,11 @@ impl App {
             }
             ui::right_text(&summary, right, ui::baseline_for(cy, 13.0), 13.0, ui::DIM);
         }
-        let footer = "1–6 or click to choose   ·   N  same game   ·   Esc  keep this deal";
-        ui::centered_text(footer, r.x + r.w / 2.0, r.y + r.h - 24.0, 13.0, ui::DIM);
+        let footer = format!(
+            "1–{} or click to choose   ·   N  same game   ·   Esc  keep this deal",
+            Variant::ALL.len()
+        );
+        ui::centered_text(&footer, r.x + r.w / 2.0, r.y + r.h - 24.0, 13.0, ui::DIM);
     }
 }
 
@@ -916,9 +1029,10 @@ fn slot_label(variant: Variant, pile: PileId) -> Option<&'static str> {
 }
 
 fn draw_help() {
-    let entries: [(&str, &str); 13] = [
+    let entries: [(&str, &str); 14] = [
         ("Click stock", "Draw, recycle or deal"),
         ("Drag", "Move a card or run"),
+        ("Click, click", "Pair two cards (Cairn)"),
         ("Double-click", "Send card to best spot"),
         ("H", "Hint (repeat for more)"),
         ("Ctrl+Z", "Undo"),

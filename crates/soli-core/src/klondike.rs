@@ -72,7 +72,7 @@ impl Klondike {
             PileId::Waste => &mut b.waste,
             PileId::Foundation(i) => &mut b.foundations[i],
             PileId::Tableau(i) => &mut b.tableau[i],
-            PileId::Cell(_) => unreachable!("Klondike has no cells"),
+            PileId::Cell(_) | PileId::Slot(_) => unreachable!("Klondike has no cells or slots"),
         }
     }
 
@@ -136,7 +136,7 @@ impl Game for Klondike {
             PileId::Waste => &b.waste,
             PileId::Foundation(i) => &b.foundations[i],
             PileId::Tableau(i) => &b.tableau[i],
-            PileId::Cell(_) => &[],
+            PileId::Cell(_) | PileId::Slot(_) => &[],
         }
     }
 
@@ -150,7 +150,7 @@ impl Game for Klondike {
             return false;
         }
         match from {
-            PileId::Stock | PileId::Cell(_) => false,
+            PileId::Stock | PileId::Cell(_) | PileId::Slot(_) => false,
             PileId::Waste | PileId::Foundation(_) => count == 1,
             // Face-up runs are always built legally, but checking keeps the
             // engine honest if a state ever gets constructed some other way.

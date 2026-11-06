@@ -152,7 +152,7 @@ impl Game for FreeCell {
             PileId::Cell(i) => &b.cells[i],
             PileId::Foundation(i) => &b.foundations[i],
             PileId::Tableau(i) => &b.tableau[i],
-            PileId::Stock | PileId::Waste => &[],
+            PileId::Stock | PileId::Waste | PileId::Slot(_) => &[],
         }
     }
 
