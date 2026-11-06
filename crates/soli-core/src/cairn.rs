@@ -9,8 +9,8 @@
 //! side as in Mahjong, how many passes through the stock are allowed, and
 //! whether there is a one-card reserve.
 //!
-//! Every deal is built backwards from a solution (see [`generate`]), so every
-//! deal can be won.
+//! Every deal is built around a solution (see [`generate`]), so every deal
+//! can be won.
 
 use crate::card::{Card, Color, Suit};
 use crate::game::{CairnLevel, Game, Hint, History, PileId, SlotPos, Variant};
@@ -39,6 +39,11 @@ pub struct Rules {
     pub reserve: bool,
     /// Most stock cards the built-in solution pairs with layout cards.
     pub max_stock_pairs: usize,
+    /// Chance (percent) that a step of the built-in solution uses the stock
+    /// even when two layout cards could pair.
+    pub stock_pair_chance: u64,
+    /// The built-in solution avoids pairing two cards freed by the same move.
+    pub spread: bool,
 }
 
 impl Default for Rules {
@@ -49,6 +54,8 @@ impl Default for Rules {
             passes: 3,
             reserve: true,
             max_stock_pairs: MAX_STOCK_PAIRS,
+            stock_pair_chance: STOCK_PAIR_CHANCE,
+            spread: true,
         }
     }
 }
@@ -207,12 +214,33 @@ pub(crate) struct Deal {
     pub solution: Vec<Step>,
 }
 
-/// Builds a deal backwards. Starting from an empty table, each step fills
-/// two slots that would be free with what is already in place (or one slot,
-/// plus a card added to the stock), and gives both cards the same kind.
-/// Played forwards, those steps remove pairs that are always both free,
-/// using the stock in a single pass, so the deal can always be won.
+/// Builds a deal around a solution. Playing the still-blank layout forwards,
+/// each step takes two free slots (or one, plus a card added to the stock)
+/// and later gives both cards the same kind, so the deal can always be won,
+/// using the stock in a single pass.
+///
+/// Any such solution pairs cards that are free at the same time, so a freed
+/// card often finds its partner waiting. To keep that from looking arranged,
+/// the solution avoids pairing two cards freed by the same move
+/// ([`Rules::spread`]); `pair_locality` in the tests measures the effect.
 pub(crate) fn generate(seed: u64, rules: &Rules) -> Deal {
+    generate_with(seed, rules, Build::Forward)
+}
+
+/// Ways to build a deal; only the default is used outside experiments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum Build {
+    /// Fill the layout from the bottom up, a pair at a time. Deals came out
+    /// slightly harder this way, but with more pairs freed by a single move.
+    Backward,
+    /// Play the empty layout forwards, taking any two free slots as a pair.
+    Forward,
+    /// Shuffle and deal, with no promise that the deal can be won.
+    Random,
+}
+
+pub(crate) fn generate_with(seed: u64, rules: &Rules, build: Build) -> Deal {
     let mut rng = SplitMix64::new(seed);
     let shapes = shapes();
     let shape = rng.below(shapes.len() as u64) as usize;
@@ -241,47 +269,101 @@ pub(crate) fn generate(seed: u64, rules: &Rules) -> Deal {
         Pair(usize, usize),
         WithStock(usize),
     }
-    let fills = 'attempt: loop {
-        let mut placed = vec![false; n];
-        let mut fills = Vec::new();
-        let mut with_stock = 0;
-        let mut left = n;
-        while left > 0 {
-            let mut open: Vec<usize> = (0..n).filter(|&i| can_place(i, &placed)).collect();
-            if open.is_empty() {
-                continue 'attempt;
+    let pick = |rng: &mut SplitMix64, from: &mut Vec<usize>| {
+        from.swap_remove(rng.below(from.len() as u64) as usize)
+    };
+    let fills = if build == Build::Forward {
+        // Steps in playing order: two slots free now become a pair.
+        'attempt: loop {
+            let mut present = vec![true; n];
+            // The step at which each slot became free.
+            let mut freed_at = vec![usize::MAX; n];
+            let mut steps = Vec::new();
+            let mut with_stock = 0;
+            let mut left = n;
+            while left > 0 {
+                let mut free: Vec<usize> = (0..n)
+                    .filter(|&i| present[i] && geo.is_free(i, rules, |j| present[j]))
+                    .collect();
+                for &i in &free {
+                    freed_at[i] = freed_at[i].min(steps.len());
+                }
+                let can_stock = with_stock < rules.max_stock_pairs.min(stock_len);
+                let use_stock =
+                    can_stock && (free.len() == 1 || rng.below(100) < rules.stock_pair_chance);
+                if use_stock {
+                    let a = pick(&mut rng, &mut free);
+                    present[a] = false;
+                    steps.push(Fill::WithStock(a));
+                    with_stock += 1;
+                    left -= 1;
+                } else if free.len() >= 2 {
+                    let a = pick(&mut rng, &mut free);
+                    let apart: Vec<usize> = free
+                        .iter()
+                        .copied()
+                        .filter(|&b| freed_at[b] != freed_at[a])
+                        .collect();
+                    let b = if rules.spread && !apart.is_empty() {
+                        let b = apart[rng.below(apart.len() as u64) as usize];
+                        free.retain(|&x| x != b);
+                        b
+                    } else {
+                        pick(&mut rng, &mut free)
+                    };
+                    present[a] = false;
+                    present[b] = false;
+                    steps.push(Fill::Pair(a, b));
+                    left -= 2;
+                } else {
+                    continue 'attempt;
+                }
             }
-            let can_stock = with_stock < rules.max_stock_pairs.min(stock_len);
-            let pick = |rng: &mut SplitMix64, from: &mut Vec<usize>| {
-                from.swap_remove(rng.below(from.len() as u64) as usize)
-            };
-            let a = pick(&mut rng, &mut open);
-            placed[a] = true;
-            // Its partner must be placeable alongside it, and leave it free.
-            let partners: Vec<usize> = if can_stock && rng.below(100) < STOCK_PAIR_CHANCE {
-                Vec::new()
-            } else {
-                (0..n)
-                    .filter(|&b| {
-                        can_place(b, &placed)
-                            && !covers(slots[b], slots[a])
-                            && geo.is_free(a, rules, |j| placed[j] || j == b)
-                    })
-                    .collect()
-            };
-            if let Some(&b) = partners.get(rng.below(partners.len().max(1) as u64) as usize) {
-                placed[b] = true;
-                fills.push(Fill::Pair(a, b));
-                left -= 2;
-            } else if can_stock {
-                fills.push(Fill::WithStock(a));
-                with_stock += 1;
-                left -= 1;
-            } else {
-                continue 'attempt;
-            }
+            // The rest of this function wants them last-removed first.
+            steps.reverse();
+            break steps;
         }
-        break fills;
+    } else {
+        'attempt: loop {
+            let mut placed = vec![false; n];
+            let mut fills = Vec::new();
+            let mut with_stock = 0;
+            let mut left = n;
+            while left > 0 {
+                let mut open: Vec<usize> = (0..n).filter(|&i| can_place(i, &placed)).collect();
+                if open.is_empty() {
+                    continue 'attempt;
+                }
+                let can_stock = with_stock < rules.max_stock_pairs.min(stock_len);
+                let a = pick(&mut rng, &mut open);
+                placed[a] = true;
+                // Its partner must be placeable alongside it, and leave it free.
+                let partners: Vec<usize> = if can_stock && rng.below(100) < rules.stock_pair_chance
+                {
+                    Vec::new()
+                } else {
+                    (0..n)
+                        .filter(|&b| {
+                            can_place(b, &placed)
+                                && !covers(slots[b], slots[a])
+                                && geo.is_free(a, rules, |j| placed[j] || j == b)
+                        })
+                        .collect()
+                };
+                if let Some(&b) = partners.get(rng.below(partners.len().max(1) as u64) as usize) {
+                    placed[b] = true;
+                    fills.push(Fill::Pair(a, b));
+                    left -= 2;
+                } else if can_stock {
+                    fills.push(Fill::WithStock(a));
+                    with_stock += 1;
+                    left -= 1;
+                } else {
+                    continue 'attempt;
+                }
+            }
+            break fills;
+        }
     };
 
     // Each step takes a pair of one kind, out of the two decks.
@@ -365,6 +447,29 @@ pub(crate) fn generate(seed: u64, rules: &Rules) -> Deal {
         draw_order.push(next.expect("counts add up"));
     }
     draw_order.reverse();
+
+    if build == Build::Random {
+        let mut all: Vec<Card> = deal_slots
+            .iter()
+            .flatten()
+            .copied()
+            .chain(draw_order)
+            .collect();
+        rng.shuffle(&mut all);
+        let rest = all.split_off(n);
+        deal_slots = all
+            .into_iter()
+            .map(|c| Some(Card { face_up: true, ..c }))
+            .collect();
+        draw_order = rest
+            .into_iter()
+            .map(|c| Card {
+                face_up: false,
+                ..c
+            })
+            .collect();
+        solution.clear();
+    }
 
     Deal {
         shape,
@@ -906,6 +1011,112 @@ mod tests {
             g.undo();
         }
         false
+    }
+
+    /// How often removing a pair hands the player the next one: of the
+    /// slots it frees, one already has a partner in play (`any`), or two of
+    /// them pair with each other (`both`). Compares ways of building deals.
+    /// Run with `cargo test -p soli-core --release pair_locality -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore]
+    fn pair_locality() {
+        println!("build     stock chance spread pass rsv |   any   both | greedy search");
+        let level = CairnLevel::Normal;
+        let mut configs = vec![(Build::Backward, 12, 20, false, 2, true)];
+        for (max, chance) in [(20, 40), (28, 70), (34, 100)] {
+            for (passes, reserve) in [(2, true), (1, true), (1, false)] {
+                configs.push((Build::Forward, max, chance, true, passes, reserve));
+            }
+        }
+        {
+            for (build, max, chance, spread, passes, reserve) in configs {
+                let rules = Rules {
+                    max_stock_pairs: max,
+                    stock_pair_chance: chance,
+                    spread,
+                    passes,
+                    reserve,
+                    ..Rules::for_level(level)
+                };
+                let (mut moves, mut any, mut both, mut wins, mut searched) = (0, 0, 0, 0, 0);
+                for seed in 1..=300u64 {
+                    let deal = || {
+                        let mut g = Cairn::with_rules(seed, level, rules);
+                        let d = generate_with(seed, &rules, build);
+                        g.board.slots = d.slots;
+                        g.board.stock = d.stock;
+                        g
+                    };
+                    let mut budget = 5000;
+                    if search(&mut deal(), &mut budget, &mut Default::default()) {
+                        searched += 1;
+                    }
+                    let mut g = deal();
+                    for _ in 0..2000 {
+                        let Some(&hint) = g.hints().first() else {
+                            break;
+                        };
+                        let free_before: Vec<usize> = (0..g.board.slots.len())
+                            .filter(|&i| g.is_free_slot(i))
+                            .collect();
+                        match hint {
+                            Hint::Stock => {
+                                g.click_stock();
+                                continue;
+                            }
+                            Hint::Move { from, count, to } => {
+                                g.move_cards(from, count, to);
+                                if to == RESERVE {
+                                    continue;
+                                }
+                            }
+                        }
+                        let fresh: Vec<usize> = (0..g.board.slots.len())
+                            .filter(|&i| g.is_free_slot(i) && !free_before.contains(&i))
+                            .collect();
+                        if fresh.is_empty() {
+                            continue;
+                        }
+                        moves += 1;
+                        let kind = |i: usize| rules.kind(g.board.slots[i].unwrap());
+                        let free_piles = g.free_piles();
+                        if fresh.iter().any(|&i| {
+                            free_piles.iter().any(|&p| {
+                                p != PileId::Slot(i)
+                                    && g.free_card(p).is_some_and(|c| rules.kind(c) == kind(i))
+                            })
+                        }) {
+                            any += 1;
+                        }
+                        if fresh
+                            .iter()
+                            .enumerate()
+                            .any(|(k, &i)| fresh[k + 1..].iter().any(|&j| kind(i) == kind(j)))
+                        {
+                            both += 1;
+                        }
+                    }
+                    if g.is_won() {
+                        wins += 1;
+                    }
+                }
+                let pct = |n: u32| 100.0 * n as f64 / moves as f64;
+                println!(
+                    "{:9} {:5} {:6} {:6} {:4} {:3} | {:5.1}% {:5.1}% | {:5.1}% {:5.1}%",
+                    format!("{build:?}"),
+                    max,
+                    chance,
+                    spread,
+                    passes,
+                    reserve,
+                    pct(any),
+                    pct(both),
+                    100.0 * wins as f64 / 300.0,
+                    100.0 * searched as f64 / 300.0
+                );
+            }
+        }
     }
 
     /// How often simple players win under each rule set. Run with
