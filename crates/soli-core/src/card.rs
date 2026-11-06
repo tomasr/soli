@@ -6,7 +6,7 @@ pub enum Suit {
     Spades,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Color {
     Red,
     Black,
