@@ -65,3 +65,9 @@ A few options exist mostly for checking the rendering without playing:
 Variant keys are `klondike-draw1`, `klondike-draw3`, `spider-1suit`,
 `spider-2suits`, `spider-4suits`, `freecell`, `cairn` (Easy), `cairn-normal`
 and `cairn-hard`.
+
+## License
+
+Soli is licensed under the [MIT License](LICENSE). The bundled Inter Tight font
+is licensed separately under the SIL Open Font License 1.1; its license is in
+`crates/soli/assets/fonts/InterTight-LICENSE.txt`.
