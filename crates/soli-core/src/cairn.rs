@@ -6,8 +6,8 @@
 //!
 //! The level sets the rest (see [`Rules::for_level`]): whether a pair must
 //! share colour as well as rank, whether a layout card also needs an open
-//! side as in Mahjong, how many passes through the stock are allowed, and
-//! whether there is a one-card reserve.
+//! side as in Mahjong, how many passes through the stock are allowed,
+//! whether there is a one-card reserve, and how many traps the deal holds.
 //!
 //! Every deal is built around a solution (see [`generate`]), so every deal
 //! can be won.
@@ -44,6 +44,10 @@ pub struct Rules {
     pub stock_pair_chance: u64,
     /// The built-in solution avoids pairing two cards freed by the same move.
     pub spread: bool,
+    /// Chance (percent) that a solution pair shares its kind with a later
+    /// pair it lies over, so pairing the wrong two copies strands the
+    /// fourth.
+    pub traps: u8,
 }
 
 impl Default for Rules {
@@ -56,6 +60,7 @@ impl Default for Rules {
             max_stock_pairs: MAX_STOCK_PAIRS,
             stock_pair_chance: STOCK_PAIR_CHANCE,
             spread: true,
+            traps: 0,
         }
     }
 }
@@ -68,6 +73,7 @@ impl Rules {
                 same_colour: true,
                 open_side: true,
                 passes: 2,
+                traps: 20,
                 ..Rules::default()
             },
             CairnLevel::Hard => Rules {
@@ -75,6 +81,7 @@ impl Rules {
                 open_side: true,
                 passes: 1,
                 reserve: false,
+                traps: 40,
                 ..Rules::default()
             },
         }
@@ -186,6 +193,22 @@ impl Geometry {
         }
     }
 
+    /// For each slot, the slots that must go before it can be freed:
+    /// everything lying over it, and over those, and so on.
+    fn buried_under(&self) -> Vec<u128> {
+        let n = self.above.len();
+        assert!(n <= 128, "layouts are at most 128 slots");
+        // Slots are listed bottom first, so everything over slot `i` comes
+        // later, and filling from the end finds each closure in one pass.
+        let mut out = vec![0u128; n];
+        for i in (0..n).rev() {
+            out[i] = self.above[i]
+                .iter()
+                .fold(0, |m, &j| m | 1u128 << j | out[j]);
+        }
+        out
+    }
+
     /// Slot `i` can be played when the slots for which `present` is true are
     /// on the table (ignoring whether `i` itself is).
     fn is_free(&self, i: usize, rules: &Rules, present: impl Fn(usize) -> bool) -> bool {
@@ -196,15 +219,15 @@ impl Geometry {
 
 /// One step of a solution, in the order it is played. Only tests replay
 /// solutions.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum Step {
-    /// Two layout cards.
-    Pair(usize, usize),
-    /// A layout card and a card drawn from the stock.
-    WithStock(usize, Card),
+    /// Pair two cards, or put one in the reserve.
+    Move(PileId, PileId),
+    Draw,
 }
 
+#[derive(Clone)]
 pub(crate) struct Deal {
     pub shape: usize,
     pub slots: Vec<Option<Card>>,
@@ -223,8 +246,91 @@ pub(crate) struct Deal {
 /// card often finds its partner waiting. To keep that from looking arranged,
 /// the solution avoids pairing two cards freed by the same move
 /// ([`Rules::spread`]); `pair_locality` in the tests measures the effect.
+///
+/// Left at that, pairing any two free cards of a kind is almost always safe.
+/// Traps ([`Rules::traps`]) give some kinds a copy lying over another, so
+/// the wrong choice strands a card. Shuffling deals and keeping those a
+/// solver can win was tried instead: under the colour and open-side rules,
+/// even a quarter of the cards shuffled left almost no deal winnable.
 pub(crate) fn generate(seed: u64, rules: &Rules) -> Deal {
     generate_with(seed, rules, Build::Forward)
+}
+
+/// A step of a solution before cards are chosen.
+#[derive(Clone, Copy)]
+enum Fill {
+    /// Two layout slots.
+    Pair(usize, usize),
+    /// A layout slot and a stock card.
+    WithStock(usize),
+}
+
+/// Chooses a kind for each step of a solution (given in playing order), at
+/// most `104 / 2 / kinds` steps per kind. With `free_before`, some steps
+/// share their kind with a later pair they lie over (see [`Rules::traps`]).
+fn assign_kinds(
+    steps: &[Fill],
+    free_before: Option<&[u128]>,
+    buried_under: &[u128],
+    rules: &Rules,
+    rng: &mut SplitMix64,
+) -> Vec<usize> {
+    let m = steps.len();
+    let slots_of = |f: Fill| match f {
+        Fill::Pair(a, b) => vec![a, b],
+        Fill::WithStock(a) => vec![a],
+    };
+    // Steps that must share a kind.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut grouped = vec![false; m];
+    for i in 0..m {
+        if grouped[i] {
+            continue;
+        }
+        grouped[i] = true;
+        let mut group = vec![i];
+        if let Some(free) = free_before
+            && rng.below(100) < u64::from(rules.traps)
+        {
+            let over = slots_of(steps[i]);
+            // A later pair with one card under this step's and the other
+            // free already: a tempting wrong partner.
+            let later: Vec<usize> = (i + 1..m)
+                .filter(|&j| !grouped[j])
+                .filter(|&j| {
+                    let Fill::Pair(b1, b2) = steps[j] else {
+                        return false;
+                    };
+                    [(b1, b2), (b2, b1)].into_iter().any(|(under, tempting)| {
+                        free[i] >> tempting & 1 == 1
+                            && over.iter().any(|&a| buried_under[under] >> a & 1 == 1)
+                    })
+                })
+                .collect();
+            if !later.is_empty() {
+                let j = later[rng.below(later.len() as u64) as usize];
+                grouped[j] = true;
+                group.push(j);
+            }
+        }
+        groups.push(group);
+    }
+
+    // Larger groups first, so each still finds a kind with room.
+    let kinds = rules.kinds();
+    let mut room = vec![104 / 2 / kinds; kinds];
+    rng.shuffle(&mut groups);
+    groups.sort_by_key(|g| std::cmp::Reverse(g.len()));
+    let mut out = vec![0; m];
+    for group in groups {
+        let fits: Vec<usize> = (0..kinds).filter(|&k| room[k] >= group.len()).collect();
+        let k = fits[rng.below(fits.len() as u64) as usize];
+        room[k] -= group.len();
+        for i in group {
+            out[i] = k;
+        }
+    }
+    out
 }
 
 /// Ways to build a deal; only the default is used outside experiments.
@@ -264,17 +370,16 @@ pub(crate) fn generate_with(seed: u64, rules: &Rules, build: Build) -> Deal {
 
     // Fill slots, last-removed first. A dead end (one slot left to fill and
     // no stock cards to spare) just starts over.
-    #[derive(Clone, Copy)]
-    enum Fill {
-        Pair(usize, usize),
-        WithStock(usize),
-    }
     let pick = |rng: &mut SplitMix64, from: &mut Vec<usize>| {
         from.swap_remove(rng.below(from.len() as u64) as usize)
     };
+    // Free slots before each step of a forward-built solution, in playing
+    // order.
+    let mut free_before: Option<Vec<u128>> = None;
     let fills = if build == Build::Forward {
         // Steps in playing order: two slots free now become a pair.
         'attempt: loop {
+            let mut frees = Vec::new();
             let mut present = vec![true; n];
             // The step at which each slot became free.
             let mut freed_at = vec![usize::MAX; n];
@@ -288,6 +393,7 @@ pub(crate) fn generate_with(seed: u64, rules: &Rules, build: Build) -> Deal {
                 for &i in &free {
                     freed_at[i] = freed_at[i].min(steps.len());
                 }
+                frees.push(free.iter().fold(0u128, |m, &i| m | 1u128 << i));
                 let can_stock = with_stock < rules.max_stock_pairs.min(stock_len);
                 let use_stock =
                     can_stock && (free.len() == 1 || rng.below(100) < rules.stock_pair_chance);
@@ -321,6 +427,7 @@ pub(crate) fn generate_with(seed: u64, rules: &Rules, build: Build) -> Deal {
             }
             // The rest of this function wants them last-removed first.
             steps.reverse();
+            free_before = Some(frees);
             break steps;
         }
     } else {
@@ -391,24 +498,29 @@ pub(crate) fn generate_with(seed: u64, rules: &Rules, build: Build) -> Deal {
     for cards in &mut by_kind {
         rng.shuffle(cards);
     }
-    let pairs_per_kind = 104 / 2 / rules.kinds();
-    let mut ranks: Vec<usize> = (0..rules.kinds())
-        .flat_map(|k| std::iter::repeat_n(k, pairs_per_kind))
-        .collect();
-    rng.shuffle(&mut ranks);
-    let mut ranks = ranks.into_iter();
+    let forward: Vec<Fill> = fills.iter().rev().copied().collect();
+    let mut kinds = assign_kinds(
+        &forward,
+        free_before.as_deref(),
+        &geo.buried_under(),
+        rules,
+        &mut rng,
+    )
+    .into_iter();
 
     let mut deal_slots = vec![None; n];
     let mut solution = Vec::with_capacity(fills.len());
+    // Layout slots paired with stock cards, alongside the card they need.
+    let mut stock_pairs: Vec<(usize, Card)> = Vec::new();
     let mut used = Vec::new();
     for fill in fills.into_iter().rev() {
-        let cards = &mut by_kind[ranks.next().expect("at most 52 steps")];
+        let cards = &mut by_kind[kinds.next().expect("one kind per step")];
         let (c1, c2) = (cards.pop().unwrap(), cards.pop().unwrap());
         match fill {
             Fill::Pair(a, b) => {
                 deal_slots[a] = Some(c1);
                 deal_slots[b] = Some(c2);
-                solution.push(Step::Pair(a, b));
+                solution.push(Step::Move(PileId::Slot(a), PileId::Slot(b)));
             }
             Fill::WithStock(a) => {
                 deal_slots[a] = Some(c1);
@@ -417,7 +529,9 @@ pub(crate) fn generate_with(seed: u64, rules: &Rules, build: Build) -> Deal {
                     ..c2
                 };
                 used.push(c2);
-                solution.push(Step::WithStock(a, c2));
+                stock_pairs.push((a, c2));
+                // Filled in once the stock's order is known.
+                solution.push(Step::Draw);
             }
         }
     }
@@ -447,6 +561,26 @@ pub(crate) fn generate_with(seed: u64, rules: &Rules, build: Build) -> Deal {
         draw_order.push(next.expect("counts add up"));
     }
     draw_order.reverse();
+
+    // Each stock pair draws until its card is on top of the waste.
+    let mut drawn = draw_order.iter().rev();
+    let mut steps = Vec::with_capacity(solution.len() + stock_len);
+    let mut stock_pairs = stock_pairs.into_iter();
+    for step in solution {
+        if step != Step::Draw {
+            steps.push(step);
+            continue;
+        }
+        let (a, card) = stock_pairs.next().expect("one per stock pair");
+        loop {
+            steps.push(Step::Draw);
+            if drawn.next().expect("the card is in the stock").id() == card.id() {
+                break;
+            }
+        }
+        steps.push(Step::Move(PileId::Waste, PileId::Slot(a)));
+    }
+    let mut solution = steps;
 
     if build == Build::Random {
         let mut all: Vec<Card> = deal_slots
@@ -667,8 +801,8 @@ impl Game for Cairn {
         let Some(card) = self.free_card(from) else {
             return false;
         };
-        if to == RESERVE {
-            return self.rules.reserve && self.board.reserve.is_empty();
+        if to == RESERVE && self.board.reserve.is_empty() {
+            return self.rules.reserve;
         }
         self.free_card(to)
             .is_some_and(|c| self.rules.kind(c) == self.rules.kind(card))
@@ -880,11 +1014,14 @@ mod tests {
         let mut out = Vec::new();
         for same_colour in [false, true] {
             for open_side in [false, true] {
-                out.push(Rules {
-                    same_colour,
-                    open_side,
-                    ..Rules::default()
-                });
+                for traps in [0, 100] {
+                    out.push(Rules {
+                        same_colour,
+                        open_side,
+                        traps,
+                        ..Rules::default()
+                    });
+                }
             }
         }
         out
@@ -912,18 +1049,8 @@ mod tests {
     fn play_solution(g: &mut Cairn) {
         for step in g.solution.clone() {
             match step {
-                Step::Pair(a, b) => {
-                    assert!(
-                        g.move_cards(PileId::Slot(a), 1, PileId::Slot(b)),
-                        "{step:?}"
-                    );
-                }
-                Step::WithStock(a, card) => {
-                    while g.pile(PileId::Waste).last().map(|c| c.id()) != Some(card.id()) {
-                        assert!(g.click_stock(), "card {card:?} never drawn");
-                    }
-                    assert!(g.move_cards(PileId::Waste, 1, PileId::Slot(a)), "{step:?}");
-                }
+                Step::Move(from, to) => assert!(g.move_cards(from, 1, to), "{step:?}"),
+                Step::Draw => assert!(g.click_stock(), "{step:?}"),
             }
         }
     }
@@ -1119,6 +1246,109 @@ mod tests {
         }
     }
 
+    /// Greedy play, counting pair removals that free a card (`moves`), and
+    /// of those, ones where a freed card's partner is already in play
+    /// (`any`) or two freed cards pair with each other (`both`).
+    fn greedy_locality(g: &mut Cairn) -> (u32, u32, u32) {
+        let (mut moves, mut any, mut both) = (0, 0, 0);
+        let rules = g.rules;
+        for _ in 0..2000 {
+            let Some(&hint) = g.hints().first() else {
+                break;
+            };
+            let free_before: Vec<usize> = (0..g.board.slots.len())
+                .filter(|&i| g.is_free_slot(i))
+                .collect();
+            match hint {
+                Hint::Stock => {
+                    g.click_stock();
+                    continue;
+                }
+                Hint::Move { from, count, to } => {
+                    g.move_cards(from, count, to);
+                    if to == RESERVE {
+                        continue;
+                    }
+                }
+            }
+            let fresh: Vec<usize> = (0..g.board.slots.len())
+                .filter(|&i| g.is_free_slot(i) && !free_before.contains(&i))
+                .collect();
+            if fresh.is_empty() {
+                continue;
+            }
+            moves += 1;
+            let kind = |i: usize| rules.kind(g.board.slots[i].unwrap());
+            let free_piles = g.free_piles();
+            if fresh.iter().any(|&i| {
+                free_piles.iter().any(|&p| {
+                    p != PileId::Slot(i) && g.free_card(p).is_some_and(|c| rules.kind(c) == kind(i))
+                })
+            }) {
+                any += 1;
+            }
+            if fresh
+                .iter()
+                .enumerate()
+                .any(|(k, &i)| fresh[k + 1..].iter().any(|&j| kind(i) == kind(j)))
+            {
+                both += 1;
+            }
+        }
+        (moves, any, both)
+    }
+
+    /// Effect of [`Rules::traps`] on how deals play. Run with `cargo test -p
+    /// soli-core --release trap_tuning -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn trap_tuning() {
+        const DEALS_PER: u64 = 300;
+        println!("level  traps |   any   both | greedy  random srch200 srch5000");
+        for level in [CairnLevel::Easy, CairnLevel::Normal, CairnLevel::Hard] {
+            let chosen = Rules::for_level(level).traps;
+            let mut amounts = vec![0, chosen / 2, chosen, chosen * 3 / 2];
+            amounts.dedup();
+            for traps in amounts {
+                let rules = Rules {
+                    traps,
+                    ..Rules::for_level(level)
+                };
+                let (mut moves, mut any, mut both, mut greedy, mut random) = (0, 0, 0, 0, 0);
+                let mut searched = [0; 2];
+                let mut rng = SplitMix64::new(7);
+                for seed in 1..=DEALS_PER {
+                    let mut g = Cairn::with_rules(seed, level, rules);
+                    let (m, a, b) = greedy_locality(&mut g);
+                    (moves, any, both) = (moves + m, any + a, both + b);
+                    greedy += u32::from(g.is_won());
+                    let mut g = Cairn::with_rules(seed, level, rules);
+                    random += u32::from(autoplay(&mut g, false, &mut rng));
+                    for (k, budget) in [200, 5000].into_iter().enumerate() {
+                        let mut g = Cairn::with_rules(seed, level, rules);
+                        let mut left = budget;
+                        if search(&mut g, &mut left, &mut Default::default()) {
+                            searched[k] += 1;
+                        }
+                    }
+                }
+                let pct = |n: u32, of: u32| 100.0 * n as f64 / of as f64;
+                let d = DEALS_PER as u32;
+                println!(
+                    "{:6} {:5} | {:5.1}% {:5.1}% | {:5.1}% {:6.1}% {:6.1}% {:6.1}%",
+                    format!("{level:?}"),
+                    traps,
+                    pct(any, moves),
+                    pct(both, moves),
+                    pct(greedy, d),
+                    pct(random, d),
+                    pct(searched[0], d),
+                    pct(searched[1], d)
+                );
+            }
+        }
+    }
+
     /// How often simple players win under each rule set. Run with
     /// `cargo test -p soli-core --release difficulty -- --ignored --nocapture`.
     #[test]
@@ -1259,6 +1489,11 @@ mod tests {
         assert!(!g.can_move(s(1), 1, RESERVE), "reserve holds one card");
         assert!(g.move_cards(RESERVE, 1, s(3)));
         assert!(g.pile(RESERVE).is_empty());
+        // And the other way round: onto the reserve card.
+        assert!(g.click_stock());
+        assert!(g.move_cards(PileId::Waste, 1, RESERVE), "park the 9");
+        g.board.slots[3] = Some(up(9));
+        assert!(g.can_move(s(3), 1, RESERVE), "pairs with the reserve card");
     }
 
     #[test]
