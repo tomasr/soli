@@ -38,7 +38,9 @@ struct Drag {
 /// a click.
 const CLICK_SLOP: f32 = 4.0;
 
-/// Shade over layout cards that are covered.
+/// Shade over layout cards that have a card on top of them. Cards held back
+/// only by their neighbours are left unshaded, so the player has to spot
+/// those.
 const COVERED_SHADE: Color = Color::new(0.0, 0.0, 0.0, 0.32);
 
 /// Games where cards are paired by clicking one and then the other.
@@ -393,8 +395,11 @@ impl App {
         let count = cards.len() - idx;
         if !self.game.can_pick_up(pile, count) {
             if pairs_by_click(self.game.variant()) {
-                // Covered: the shading already says why.
+                // Covered cards are shaded; anything else gets a reason.
                 self.selected = None;
+                if let Some(reason) = self.game.blocked_reason(pile) {
+                    self.show_toast(reason);
+                }
                 return;
             }
             if cards[idx].face_up {
@@ -841,7 +846,7 @@ impl App {
                     render::draw_outline(rect(card), color);
                 }
                 render::draw_card(card, rect(card), back);
-                if matches!(pile, PileId::Slot(_)) && !self.game.can_pick_up(pile, 1) {
+                if self.game.is_covered(pile) {
                     render::rounded_rect(rect(card), rect(card).w * 0.08, COVERED_SHADE);
                 }
             }

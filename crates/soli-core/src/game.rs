@@ -241,6 +241,18 @@ pub trait Game {
     /// A player move. Returns false (and changes nothing) if it is illegal.
     fn move_cards(&mut self, from: PileId, count: usize, to: PileId) -> bool;
 
+    /// A card lies over this pile's top card. Cards held back only by their
+    /// neighbours (Cairn's open-side rule) are not covered.
+    fn is_covered(&self, _pile: PileId) -> bool {
+        false
+    }
+
+    /// Why the top card of `pile` can't be played, when it isn't covered
+    /// and the reason may not be obvious.
+    fn blocked_reason(&self, _pile: PileId) -> Option<&'static str> {
+        None
+    }
+
     /// Why moving `count` cards from `from` to `to` is refused, when the
     /// reason may not be obvious to the player.
     fn refusal(&self, _from: PileId, _count: usize, _to: PileId) -> Option<&'static str> {

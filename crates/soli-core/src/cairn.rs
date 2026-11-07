@@ -73,7 +73,7 @@ impl Rules {
                 same_colour: true,
                 open_side: true,
                 passes: 2,
-                traps: 20,
+                traps: 30,
                 ..Rules::default()
             },
             CairnLevel::Hard => Rules {
@@ -812,6 +812,25 @@ impl Game for Cairn {
         count == 1 && self.apply_move(from, to, false)
     }
 
+    fn is_covered(&self, pile: PileId) -> bool {
+        let PileId::Slot(i) = pile else {
+            return false;
+        };
+        let slots = &self.board.slots;
+        slots.get(i).is_some_and(Option::is_some)
+            && self.geo.above[i].iter().any(|&j| slots[j].is_some())
+    }
+
+    fn blocked_reason(&self, pile: PileId) -> Option<&'static str> {
+        let PileId::Slot(i) = pile else {
+            return None;
+        };
+        (self.board.slots.get(i).is_some_and(Option::is_some)
+            && !self.is_covered(pile)
+            && !self.is_free_slot(i))
+        .then_some("Needs an open side: left or right")
+    }
+
     fn refusal(&self, from: PileId, _count: usize, to: PileId) -> Option<&'static str> {
         let (a, b) = (self.free_card(from)?, self.free_card(to)?);
         (from != to && a.rank == b.rank && a.color() != b.color())
@@ -1439,6 +1458,24 @@ mod tests {
             c.face_up = false;
         }
         g
+    }
+
+    #[test]
+    fn side_blocked_cards_are_not_covered() {
+        let mut g = small_game();
+        g.rules.open_side = true;
+        // A row of three: the middle card has neighbours on both sides.
+        g.shape.slots = vec![pos(0, 0, 0), pos(2, 0, 0), pos(4, 0, 0), pos(1, 1, 1)];
+        g.geo = Geometry::new(&g.shape.slots);
+        let s = PileId::Slot;
+        assert!(!g.can_pick_up(s(1), 1));
+        assert!(g.is_covered(s(1)), "slot 3 lies over it");
+        assert_eq!(g.blocked_reason(s(1)), None, "covered speaks for itself");
+        g.board.slots[3] = None;
+        assert!(!g.is_covered(s(1)));
+        assert!(!g.can_pick_up(s(1), 1), "still boxed in");
+        assert!(g.blocked_reason(s(1)).is_some());
+        assert!(g.can_pick_up(s(2), 1) && g.blocked_reason(s(2)).is_none());
     }
 
     #[test]
