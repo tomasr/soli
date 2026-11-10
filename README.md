@@ -7,6 +7,11 @@ font.
 
 ![Cairn, on the Peak layout](docs/images/cairn.png)
 
+**Note:** There is absolutely nothing nobel here. There are plenty of Solitaire-like
+games out there. I built this strinctly for my own amusement, and mostly because I
+just miss the old Solitaire games that used to ship with Windows (particularly FreeCell).
+Building Soli has been fun. Yes, it's all Claude. Don't mind, don't care.
+
 ## Games
 
 | Game | Variants | In short |
