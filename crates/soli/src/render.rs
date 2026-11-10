@@ -310,6 +310,9 @@ fn paint_card(card: Card, r: Rect, back: &Back, covered: bool) {
     rounded_rect(Rect::new(r.x, r.y + drop, r.w, r.h), radius, CARD_SHADOW);
     if card.face_up {
         rounded_rect(r, radius, PAPER);
+        // The frame's top edge is what tells fanned face-up cards apart. It
+        // sits closer to the edge than the back's, to clear the corner index.
+        inner_frame(r, r.w * 0.045, alpha(INK, 0.16));
         draw_face(card, r);
     } else {
         draw_back(r, back);
@@ -566,10 +569,9 @@ fn paint_atlas(card: (u32, u32), cells: usize, dpi: f32, cards: &Cards) -> Atlas
     }
 }
 
-fn draw_back(r: Rect, back: &Back) {
-    let radius = corner_radius(r);
-    rounded_rect(r, radius, back.base);
-    let inset = (r.w * 0.06).max(3.0);
+/// A thin rounded frame `inset` inside a card's edge.
+fn inner_frame(r: Rect, inset: f32, color: Color) {
+    let inset = inset.max(3.0);
     let frame = Rect::new(
         r.x + inset,
         r.y + inset,
@@ -578,10 +580,16 @@ fn draw_back(r: Rect, back: &Back) {
     );
     rounded_rect_lines(
         frame,
-        (radius - inset + 2.0).max(2.0),
+        (corner_radius(r) - inset + 2.0).max(2.0),
         (r.w * 0.01).max(1.0),
-        alpha(back.line, 0.35),
+        color,
     );
+}
+
+fn draw_back(r: Rect, back: &Back) {
+    let radius = corner_radius(r);
+    rounded_rect(r, radius, back.base);
+    inner_frame(r, r.w * 0.06, alpha(back.line, 0.35));
     art::draw_back(back.animal, r, (r.w * 0.018).max(1.0), back.line);
 }
 
