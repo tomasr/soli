@@ -101,6 +101,7 @@ The front end is a single-threaded macroquad loop in `main.rs` that computes a
 | `app.rs` | Game state, input (drag, click, double-click, keys), overlays, statistics bookkeeping, drawing the table |
 | `layout.rs` | Screen geometry, recomputed every frame so the table follows window resizes |
 | `render.rs` | Card faces, backs and suits drawn from primitives and cached in a texture atlas, the palette, text |
+| `glyphs.rs` | Rank labels rasterised for painting the card atlas |
 | `art.rs` | The line-art animals, stored as a subset of SVG path data and flattened once |
 | `anim.rs` | Card motion |
 | `ui.rs` | Panels, keycaps, toasts |
@@ -131,10 +132,17 @@ A card built from primitives takes thousands of triangles, mostly for the
 line-art animals, which is too many to redo every frame. Instead, every face
 and back is painted once into an atlas texture at the card's size in physical
 pixels, and each card on the table is drawn as one textured quad, placed on
-whole pixels so the atlas maps 1:1 to the screen. The atlas is repainted when
-the card size or display scale changes. In Cairn it also holds a shaded copy
-of every card for covered cards. The shading is painted into the atlas
-because drawing it over a card leaves a light fringe at the corners.
+whole pixels so the atlas maps 1:1 to the screen. In Cairn the atlas also
+holds a shaded copy of every card for covered cards. The shading is painted
+into the atlas because drawing it over a card leaves a light fringe at the
+corners.
+
+The atlas is repainted when the card size or display scale changes, but
+only after the new size has held for 0.2 seconds. While a window is being
+resized the size changes every frame, and painting an atlas every frame
+pushes memory use into the gigabytes, because the driver is slow to free the
+old render targets. Until the atlas is ready, cards are painted from
+primitives as before, and the loop doesn't go idle.
 
 The cards are painted with multisampling, a row at a time, into a target that
 holds premultiplied alpha. Each row is then copied into the atlas with
@@ -143,8 +151,17 @@ default material lets a whole table of cards go out in a single draw call.
 With a custom material, macroquad starts a new draw call each time the
 material changes.
 
-`--bench <frames>` with `--screenshot` draws frames as fast as it can and
-prints the average frame time, for comparing rendering changes.
+The rank labels in the atlas don't come from macroquad's text drawing.
+`glyphs.rs` rasterises them with fontdue into a texture of their own. A
+macroquad font keeps its glyphs in one texture and replaces it, repacked,
+when it runs out of room. Draw calls only run when the frame ends, so any
+text queued before the replacement comes out blank or garbled. On screen the
+next frame fixes that. In the atlas it would stay until the next repaint,
+which is how ranks went missing from cards.
+
+`--bench <frames>` with `--screenshot` draws frames as fast as it can, once
+the atlas is ready, and prints the average frame time, for comparing
+rendering changes.
 
 ### Input
 

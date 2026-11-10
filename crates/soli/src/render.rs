@@ -7,6 +7,7 @@
 //! card on the table is a single textured quad.
 
 use crate::art::{self, Animal};
+use crate::glyphs::RankLabels;
 use macroquad::miniquad::{BlendFactor, BlendState, BlendValue, Equation, PipelineParams};
 use macroquad::prelude::*;
 use soli_core::{Card, Suit};
@@ -263,7 +264,7 @@ fn draw_atlas_card(card: Card, r: Rect, back: &Back, covered: bool) {
     };
     let index = index.map(|i| if covered { i + ATLAS_CARDS } else { i });
     if !index.is_some_and(|i| draw_cell(i, r)) {
-        paint_card(card, r, back, covered);
+        paint_card(card, r, back, covered, None);
     }
 }
 
@@ -279,7 +280,7 @@ fn draw_cell(index: usize, r: Rect) -> bool {
             return false;
         }
         let (cw, ch) = atlas.cell;
-        let (col, row) = (index as u32 % ATLAS_COLS, index as u32 / ATLAS_COLS);
+        let (col, row) = (index as u32 % atlas.cols, index as u32 / atlas.cols);
         // Land the card on whole physical pixels so atlas texels map 1:1.
         let x = (r.x * dpi).round() - ATLAS_PAD as f32;
         let y = (r.y * dpi).round() - ATLAS_PAD as f32;
@@ -303,8 +304,9 @@ fn draw_cell(index: usize, r: Rect) -> bool {
     })
 }
 
-/// Paints a card from primitives.
-fn paint_card(card: Card, r: Rect, back: &Back, covered: bool) {
+/// Paints a card from primitives. The rank comes from `ranks` when given,
+/// which must be at this card's size, and is drawn as text otherwise.
+fn paint_card(card: Card, r: Rect, back: &Back, covered: bool, ranks: Option<&RankLabels>) {
     let radius = corner_radius(r);
     let drop = drop_edge(r.w);
     rounded_rect(Rect::new(r.x, r.y + drop, r.w, r.h), radius, CARD_SHADOW);
@@ -313,7 +315,7 @@ fn paint_card(card: Card, r: Rect, back: &Back, covered: bool) {
         // The frame's top edge is what tells fanned face-up cards apart. It
         // sits closer to the edge than the back's, to clear the corner index.
         inner_frame(r, r.w * 0.045, alpha(INK, 0.16));
-        draw_face(card, r);
+        draw_face(card, r, ranks);
     } else {
         draw_back(r, back);
     }
@@ -336,10 +338,13 @@ fn drop_edge(card_w: f32) -> f32 {
     (card_w * 0.014).max(1.0)
 }
 
-/// Cards per row in the atlas, and the transparent margin around each card
-/// so its antialiased edge isn't cut off.
+/// Cards per row in the atlas (fewer if they would make it too wide), and the
+/// transparent margin around each card so its antialiased edge isn't cut off.
 const ATLAS_COLS: u32 = 12;
 const ATLAS_PAD: u32 = 2;
+/// The largest atlas side, in pixels, that every GPU we care about supports.
+/// Cards too big to fit are painted directly instead.
+const ATLAS_MAX: u32 = 8192;
 
 /// The atlas holds the 52 faces, then every back; then, for games that shade
 /// covered cards, all of them again under `COVERED_SHADE`.
@@ -365,6 +370,8 @@ struct Atlas {
     card: (u32, u32),
     /// Cell size in physical pixels: the card, its drop edge and padding.
     cell: (u32, u32),
+    /// Cards per row.
+    cols: u32,
     /// How many cards it holds.
     cells: usize,
     /// Kept whole: dropping a render target's pass before the frame that
@@ -378,6 +385,15 @@ struct Atlas {
 
 struct Cards {
     atlas: Option<Atlas>,
+    /// The card size (physical pixels) and cell count last asked for, and
+    /// since when.
+    wanted: Option<((u32, u32), usize)>,
+    wanted_since: f64,
+    /// Rank labels for painting the atlas, at the last size painted (see
+    /// `glyphs` for why the atlas doesn't draw them as text).
+    ranks: Option<RankLabels>,
+    /// Whether the atlas matched the last `prepare_cards` call.
+    ready: bool,
     /// Paints into the atlas, leaving it with premultiplied alpha. Blending
     /// the alpha channel the ordinary way would square the alpha of anything
     /// translucent, such as the drop edge.
@@ -395,6 +411,10 @@ struct Cards {
 thread_local! {
     static CARDS: RefCell<Cards> = RefCell::new(Cards {
         atlas: None,
+        wanted: None,
+        wanted_since: 0.0,
+        ranks: None,
+        ready: false,
         paint: card_material(
             PAINT_FRAGMENT,
             Some(BlendState::new(
@@ -479,30 +499,68 @@ fn card_material(
 /// before anything is drawn: painting the atlas clears pending draw calls.
 /// `covered` adds the shaded cards that `draw_covered_card` needs, doubling
 /// the atlas, so only games that shade cards ask for them.
+///
+/// Until the atlas is ready, cards are painted directly. A new size waits
+/// until it has held for `SETTLE_SECS`: while a window is being resized the
+/// size changes every frame, and an atlas a frame (hundreds of megabytes of
+/// render targets the driver frees lazily) would balloon memory use.
 pub fn prepare_cards(card: Vec2, covered: bool) {
     let dpi = screen_dpi_scale();
     let size = physical_size(card, dpi);
     let cells = if covered { 2 } else { 1 } * ATLAS_CARDS;
+    let now = get_time();
     CARDS.with_borrow_mut(|cards| {
         if let Some(atlas) = cards.atlas.as_mut()
             && atlas.card == size
             && atlas.cells == cells
         {
             atlas.painted = None;
+            cards.ready = true;
             return;
         }
+        cards.ready = false;
+        if cards.wanted != Some((size, cells)) {
+            cards.wanted = Some((size, cells));
+            cards.wanted_since = now;
+            return;
+        }
+        if now - cards.wanted_since < SETTLE_SECS {
+            return;
+        }
+        let rank_px = font_px(rank_size(size.0 as f32 / dpi)).0;
+        if cards.ranks.as_ref().is_none_or(|r| r.px() != rank_px) {
+            cards.ranks = Some(RankLabels::new(rank_px));
+        }
         cards.atlas = None;
-        cards.atlas = Some(paint_atlas(size, cells, dpi, cards));
+        cards.atlas = paint_atlas(size, cells, dpi, cards);
+        cards.ready = true;
     });
 }
 
-fn paint_atlas(card: (u32, u32), cells: usize, dpi: f32, cards: &Cards) -> Atlas {
+/// How long a new card size has to hold before the atlas is repainted for it.
+const SETTLE_SECS: f64 = 0.2;
+
+/// False while the atlas is still being prepared for a new card size, so the
+/// frame on screen isn't final yet.
+pub fn cards_ready() -> bool {
+    CARDS.with_borrow(|cards| cards.ready)
+}
+
+/// Paints the atlas, or returns None if cards this size don't fit in one.
+fn paint_atlas(card: (u32, u32), cells: usize, dpi: f32, cards: &Cards) -> Option<Atlas> {
     let (w, h) = card;
     let logical = vec2(w as f32 / dpi, h as f32 / dpi);
     let drop = (drop_edge(logical.x) * dpi).ceil() as u32;
     let cell = (w + 2 * ATLAS_PAD, h + drop + 2 * ATLAS_PAD);
-    let rows = (cells as u32).div_ceil(ATLAS_COLS);
-    let (aw, ah) = (ATLAS_COLS * cell.0, rows * cell.1);
+    let cols = ATLAS_COLS.min(ATLAS_MAX / cell.0);
+    if cols == 0 {
+        return None;
+    }
+    let rows = (cells as u32).div_ceil(cols);
+    let (aw, ah) = (cols * cell.0, rows * cell.1);
+    if ah > ATLAS_MAX {
+        return None;
+    }
     let target = render_target(aw, ah);
     target.texture.set_filter(FilterMode::Linear);
     // Cards are painted a row at a time, so the multisampled target (four
@@ -519,14 +577,15 @@ fn paint_atlas(card: (u32, u32), cells: usize, dpi: f32, cards: &Cards) -> Atlas
         render_target: Some(into.clone()),
         ..Default::default()
     };
+    let ranks = cards.ranks.as_ref();
     for row in 0..rows {
         set_camera(&camera(&painted, row_h));
         // Not clear_background, which would drop the rows queued so far.
         gl_use_material(&cards.replace);
         draw_rectangle(0.0, 0.0, lw, row_h, Color::new(0.0, 0.0, 0.0, 0.0));
         gl_use_material(&cards.paint);
-        for col in 0..ATLAS_COLS {
-            let index = (row * ATLAS_COLS + col) as usize;
+        for col in 0..cols {
+            let index = (row * cols + col) as usize;
             if index >= cells {
                 break;
             }
@@ -539,9 +598,10 @@ fn paint_atlas(card: (u32, u32), cells: usize, dpi: f32, cards: &Cards) -> Atlas
             let (i, covered) = (index % ATLAS_CARDS, index >= ATLAS_CARDS);
             if i < 52 {
                 let card = Card::new(i as u8 % 13 + 1, Suit::ALL[i / 13]).turned_up();
-                paint_card(card, r, &BACKS[0], covered);
+                paint_card(card, r, &BACKS[0], covered, ranks);
             } else {
-                paint_card(Card::new(1, Suit::Spades), r, &BACKS[i - 52], covered);
+                let card = Card::new(1, Suit::Spades);
+                paint_card(card, r, &BACKS[i - 52], covered, ranks);
             }
         }
 
@@ -560,13 +620,14 @@ fn paint_atlas(card: (u32, u32), cells: usize, dpi: f32, cards: &Cards) -> Atlas
     }
     gl_use_default_material();
     set_default_camera();
-    Atlas {
+    Some(Atlas {
         card,
         cell,
+        cols,
         cells,
         target,
         painted: Some(painted),
-    }
+    })
 }
 
 /// A thin rounded frame `inset` inside a card's edge.
@@ -593,6 +654,10 @@ fn draw_back(r: Rect, back: &Back) {
     art::draw_back(back.animal, r, (r.w * 0.018).max(1.0), back.line);
 }
 
+fn rank_size(card_w: f32) -> f32 {
+    card_w * 0.24
+}
+
 fn ink(card: Card) -> Color {
     match card.color() {
         soli_core::Color::Red => BRICK,
@@ -600,7 +665,7 @@ fn ink(card: Card) -> Color {
     }
 }
 
-fn draw_face(card: Card, r: Rect) {
+fn draw_face(card: Card, r: Rect, ranks: Option<&RankLabels>) {
     let color = ink(card);
     let label = card.rank_label();
 
@@ -608,15 +673,28 @@ fn draw_face(card: Card, r: Rect) {
     // read in the strip a fanned card leaves visible.
     let pad_x = r.w * 0.096;
     let pad_y = r.w * 0.08;
-    let rank_size = r.w * 0.24;
-    let m = measure(label, rank_size);
-    let baseline = r.y + pad_y + m.offset_y;
-    text(label, r.x + pad_x, baseline, rank_size, color);
+    let rank_size = rank_size(r.w);
+    let x = r.x + pad_x;
+    let (width, baseline) = match ranks {
+        Some(ranks) => {
+            let dpi = screen_dpi_scale();
+            let (width, top) = ranks.measure(card.rank, dpi);
+            let baseline = r.y + pad_y + top;
+            ranks.draw(card.rank, x, baseline, dpi, color);
+            (width, baseline)
+        }
+        None => {
+            let m = measure(label, rank_size);
+            let baseline = r.y + pad_y + m.offset_y;
+            text(label, x, baseline, rank_size, color);
+            (m.width, baseline)
+        }
+    };
     let suit_size = r.w * 0.15;
     draw_suit(
         card.suit,
         vec2(
-            r.x + pad_x + m.width + r.w * 0.03 + suit_size * 0.48,
+            x + width + r.w * 0.03 + suit_size * 0.48,
             baseline - suit_size * 0.5,
         ),
         suit_size,

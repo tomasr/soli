@@ -5,6 +5,7 @@
 mod anim;
 mod app;
 mod art;
+mod glyphs;
 mod idle;
 mod layout;
 mod persist;
@@ -172,7 +173,7 @@ async fn main() {
             .and_then(|i| args.get(i + 1))
             .and_then(|s| s.parse().ok())
     };
-    let bench_start = Instant::now();
+    let mut bench_start = Instant::now();
 
     let mut frames = 0;
     // Whether the frame just presented showed the table at rest, so the next
@@ -198,6 +199,12 @@ async fn main() {
         }
 
         if let Some(n) = bench {
+            // Count from when the card atlas is ready.
+            if !render::cards_ready() {
+                bench_start = Instant::now();
+                next_frame().await;
+                continue;
+            }
             frames += 1;
             if frames == n {
                 let ms = bench_start.elapsed().as_secs_f64() * 1000.0 / n as f64;
@@ -208,7 +215,9 @@ async fn main() {
             continue;
         }
 
-        if let Mode::Screenshot(path) | Mode::Gallery(path) = &mode {
+        if let Mode::Screenshot(path) | Mode::Gallery(path) = &mode
+            && render::cards_ready()
+        {
             frames += 1;
             if frames == 3 {
                 // The framebuffer's alpha channel isn't shown on screen, but
@@ -245,7 +254,8 @@ async fn main() {
             std::thread::sleep(rest);
         }
         // After waking for input, the next frame has to draw what it did.
-        at_rest = matches!(mode, Mode::Play) && !woke_for_input && !app.busy();
+        at_rest =
+            matches!(mode, Mode::Play) && !woke_for_input && !app.busy() && render::cards_ready();
         next_frame().await;
     }
 }
