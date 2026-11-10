@@ -100,7 +100,7 @@ The front end is a single-threaded macroquad loop in `main.rs` that computes a
 |---|---|
 | `app.rs` | Game state, input (drag, click, double-click, keys), overlays, statistics bookkeeping, drawing the table |
 | `layout.rs` | Screen geometry, recomputed every frame so the table follows window resizes |
-| `render.rs` | Card faces, backs and suits drawn from primitives, the palette, text |
+| `render.rs` | Card faces, backs and suits drawn from primitives and cached in a texture atlas, the palette, text |
 | `art.rs` | The line-art animals, stored as a subset of SVG path data and flattened once |
 | `anim.rs` | Card motion |
 | `ui.rs` | Panels, keycaps, toasts |
@@ -123,6 +123,27 @@ should rest. Any card whose position changed gets a short flight (0.16 seconds,
 eased) from the old position to the new one. Since cards are keyed by
 `(rank, suit, copy)`, this works the same for moves, undo, dealing and
 auto-finish, with no per-action animation code.
+
+### Card atlas
+
+A card built from primitives takes thousands of triangles, mostly for the
+line-art animals, which is too many to redo every frame. Instead, every face
+and back is painted once into an atlas texture at the card's size in physical
+pixels, and each card on the table is drawn as one textured quad, placed on
+whole pixels so the atlas maps 1:1 to the screen. The atlas is repainted when
+the card size or display scale changes. In Cairn it also holds a shaded copy
+of every card for covered cards. The shading is painted into the atlas
+because drawing it over a card leaves a light fringe at the corners.
+
+The cards are painted with multisampling, a row at a time, into a target that
+holds premultiplied alpha. Each row is then copied into the atlas with
+straight alpha, which is what macroquad's default material expects. Using the
+default material lets a whole table of cards go out in a single draw call.
+With a custom material, macroquad starts a new draw call each time the
+material changes.
+
+`--bench <frames>` with `--screenshot` draws frames as fast as it can and
+prints the average frame time, for comparing rendering changes.
 
 ### Input
 

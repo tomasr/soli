@@ -38,11 +38,6 @@ struct Drag {
 /// a click.
 const CLICK_SLOP: f32 = 4.0;
 
-/// Shade over layout cards that have a card on top of them. Cards held back
-/// only by their neighbours are left unshaded, so the player has to spot
-/// those.
-const COVERED_SHADE: Color = Color::new(0.0, 0.0, 0.0, 0.32);
-
 /// Games where cards are paired by clicking one and then the other.
 fn pairs_by_click(variant: Variant) -> bool {
     matches!(variant, Variant::Cairn(_))
@@ -700,6 +695,11 @@ impl App {
     pub fn draw(&self, layout: &Layout) {
         let table = &TABLES[self.settings.table % TABLES.len()];
         let back = &BACKS[self.settings.card_back % BACKS.len()];
+        // Only Cairn shades covered cards.
+        render::prepare_cards(
+            layout.card,
+            matches!(self.game.variant(), Variant::Cairn(_)),
+        );
         clear_background(table.felt);
         let mouse: Vec2 = mouse_position().into();
         let now = get_time();
@@ -845,9 +845,10 @@ impl App {
                 if let Some(&(_, color)) = slot_glows.iter().find(|(p, _)| *p == pile) {
                     render::draw_outline(rect(card), color);
                 }
-                render::draw_card(card, rect(card), back);
                 if self.game.is_covered(pile) {
-                    render::rounded_rect(rect(card), rect(card).w * 0.08, COVERED_SHADE);
+                    render::draw_covered_card(card, rect(card), back);
+                } else {
+                    render::draw_card(card, rect(card), back);
                 }
             }
         }

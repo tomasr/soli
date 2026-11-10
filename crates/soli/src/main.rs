@@ -83,12 +83,13 @@ fn window_conf() -> Conf {
 
 /// All 52 faces plus every card back, for checking card art.
 fn draw_gallery() {
-    clear_background(render::TABLES[0].felt);
     let (sw, sh) = (screen_width(), screen_height());
     let cols = 13.0;
     let gap = 8.0;
     let w = ((sw - gap * (cols + 1.0)) / cols).min((sh - gap * 6.0) / 5.0 / 1.4);
     let h = w * 1.4;
+    render::prepare_cards(vec2(w, h), false);
+    clear_background(render::TABLES[0].felt);
     for (row, suit) in Suit::ALL.iter().enumerate() {
         for rank in 1..=13u8 {
             let card = Card::new(rank, *suit).turned_up();
@@ -160,6 +161,18 @@ async fn main() {
     // can be saved first.
     prevent_quit();
 
+    // `--bench <frames>` (with --screenshot or --gallery): instead of saving
+    // a PNG, draw that many frames flat out and print the average frame time,
+    // for comparing rendering changes.
+    let bench: Option<u32> = {
+        let args: Vec<String> = std::env::args().collect();
+        args.iter()
+            .position(|a| a == "--bench")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok())
+    };
+    let bench_start = Instant::now();
+
     let mut frames = 0;
     loop {
         let frame_start = Instant::now();
@@ -171,6 +184,17 @@ async fn main() {
             }
             Mode::Screenshot(_) => app.draw(&layout),
             Mode::Gallery(_) => draw_gallery(),
+        }
+
+        if let Some(n) = bench {
+            frames += 1;
+            if frames == n {
+                let ms = bench_start.elapsed().as_secs_f64() * 1000.0 / n as f64;
+                println!("{n} frames, {ms:.3} ms/frame");
+                break;
+            }
+            next_frame().await;
+            continue;
         }
 
         if let Mode::Screenshot(path) | Mode::Gallery(path) = &mode {
