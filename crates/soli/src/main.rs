@@ -5,6 +5,7 @@
 mod anim;
 mod app;
 mod art;
+mod idle;
 mod layout;
 mod persist;
 mod render;
@@ -174,7 +175,17 @@ async fn main() {
     let bench_start = Instant::now();
 
     let mut frames = 0;
+    // Whether the frame just presented showed the table at rest, so the next
+    // one can wait for input instead of drawing the same picture again.
+    let mut at_rest = false;
     loop {
+        // An idle table is only redrawn when something could have changed it:
+        // input or another window message, or the clock ticking over. Waiting
+        // here, after the last frame was presented, rather than before
+        // presenting it, keeps that frame on screen while we wait. Input that
+        // wakes us is read by the next frame, so this one draws the same
+        // picture again and skips its frame budget.
+        let woke_for_input = at_rest && idle::wait_for_input(app.next_tick());
         let frame_start = Instant::now();
         let layout = Layout::compute(screen_width(), screen_height(), app.game.as_ref());
         match &mode {
@@ -223,10 +234,18 @@ async fn main() {
         }
 
         // Sleep before presenting, so input is read as late as possible after.
-        let budget = if app.busy() { ACTIVE_FRAME } else { IDLE_FRAME };
+        let budget = if woke_for_input {
+            Duration::ZERO
+        } else if app.busy() {
+            ACTIVE_FRAME
+        } else {
+            IDLE_FRAME
+        };
         if let Some(rest) = budget.checked_sub(frame_start.elapsed()) {
             std::thread::sleep(rest);
         }
+        // After waking for input, the next frame has to draw what it did.
+        at_rest = matches!(mode, Mode::Play) && !woke_for_input && !app.busy();
         next_frame().await;
     }
 }

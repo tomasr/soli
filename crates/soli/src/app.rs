@@ -7,7 +7,7 @@ use crate::ui::{self, format_time};
 use macroquad::prelude::*;
 use soli_core::{Card, Game, Hint, PileId, Variant};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DOUBLE_CLICK_SECS: f64 = 0.35;
 /// Pace of automatic moves (auto-move and auto-finish).
@@ -270,6 +270,19 @@ impl App {
                 .as_ref()
                 .is_some_and(|(_, t)| get_time() - t < 2.0)
             || is_mouse_button_down(MouseButton::Left)
+    }
+
+    /// How long an idle table can go undrawn: until the clock in the status
+    /// bar next ticks over. At most a second either way, so nothing that
+    /// changes on its own is left stale for long.
+    pub fn next_tick(&self) -> Duration {
+        let wait = if self.played && !self.game.is_won() {
+            // A little past the tick, so the new second has been reached.
+            1.0 - self.elapsed.fract() + 0.005
+        } else {
+            1.0
+        };
+        Duration::from_secs_f32(wait.min(1.0))
     }
 
     fn drag_origin(&self, drag: &Drag, mouse: Vec2) -> Vec2 {

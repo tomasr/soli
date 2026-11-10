@@ -104,6 +104,7 @@ The front end is a single-threaded macroquad loop in `main.rs` that computes a
 | `art.rs` | The line-art animals, stored as a subset of SVG path data and flattened once |
 | `anim.rs` | Card motion |
 | `ui.rs` | Panels, keycaps, toasts |
+| `idle.rs` | Waiting for input while the table is at rest |
 | `persist.rs` | Settings and statistics as TOML |
 
 ### Layout
@@ -160,8 +161,16 @@ when cards overlap.
 VSync is off, because a vsynced OpenGL swap chain queues frames and makes a
 dragged card trail behind the cursor. Instead, the loop caps the frame rate
 itself: 165 fps while anything is moving or the mouse button is down, and 60
-fps when the table is still. The loop sleeps before presenting, so input is
-read as late as possible.
+fps otherwise. The loop sleeps before presenting, so input is read as late as
+possible.
+
+A table at rest isn't redrawn at all. Once a frame showing a still table is
+on screen, the loop waits (`MsgWaitForMultipleObjectsEx`, in `idle.rs`) until a
+window message arrives or the status bar clock is due to tick, at most a
+second. Input that wakes it is handled by the frame after next, because
+macroquad reads input before our code runs. So the frame drawn right after
+waking repeats the last picture and skips its frame budget, and the one after
+that shows the input.
 
 ### Settings and statistics
 
