@@ -66,6 +66,11 @@ pub struct Settings {
     pub table: usize,
     /// Last window size in physical pixels.
     pub window: Option<(u32, u32)>,
+    /// Spider deals only come from seeds the solver can win.
+    pub winnable_deals: bool,
+    /// The next winnable seed for each variant that has one ready, by variant
+    /// key. Strings, because TOML integers stop at `i64::MAX`.
+    pub winnable_seeds: BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -77,6 +82,8 @@ impl Default for Settings {
             card_back: 0,
             table: 0,
             window: None,
+            winnable_deals: true,
+            winnable_seeds: BTreeMap::new(),
         }
     }
 }
@@ -105,6 +112,18 @@ impl Settings {
 
     pub fn set_variant(&mut self, variant: Variant) {
         self.variant = Some(variant.key().to_owned());
+    }
+
+    pub fn winnable_seed(&self, variant: Variant) -> Option<u64> {
+        self.winnable_seeds.get(variant.key())?.parse().ok()
+    }
+
+    pub fn set_winnable_seed(&mut self, variant: Variant, seed: Option<u64>) {
+        let key = variant.key().to_owned();
+        match seed {
+            Some(seed) => self.winnable_seeds.insert(key, seed.to_string()),
+            None => self.winnable_seeds.remove(&key),
+        };
     }
 }
 

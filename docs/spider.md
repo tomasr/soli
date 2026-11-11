@@ -51,6 +51,34 @@ Double-clicking a run sends it to the best column it can go to: one where it
 continues the same suit first, then any card one rank higher, then an empty
 column.
 
+### Winnable deals
+
+With winnable deals on (the default; `W` toggles it), every deal is one the
+solver in `spider/solver.rs` has won. `winnable_seed` tries the given seed,
+then a series of seeds derived from it, until the solver wins one.
+
+The solver sees the face-down cards and the stock, so it proves a deal can be
+won without saying the win is easy to find. It packs each card into a byte
+and treats the two copies of a card as the same card. Its search is a beam
+search split into stages at the deals: within a stage it keeps the 400 best
+positions at each step, scored by completed runs, face-down cards (bad),
+empty columns (good) and how well the face-up cards are stacked, and it
+remembers the best positions a deal can be made from. The next stage deals
+onto those. Moves that can't help are left out: only whole same-suit runs
+move, and a run sitting on a card one higher only moves to its own suit or to
+make room for a card of the right suit.
+
+It wins nearly every 1-suit deal and most 2-suit deals, but only about a
+quarter to a third of 4-suit deals, which take it around 0.2 seconds each. The
+rest may well be winnable too; the solver just didn't find the way. Finding a
+winnable 4-suit deal usually takes under a second but can take several, so the
+front end (`deals.rs`) finds the next one for each Spider variant on a
+background thread and keeps it in the settings file, ready for the next deal
+or the next launch.
+
+Because the solver only finds the deals it's good at, winnable deals lean
+towards the easier ones.
+
 ### Hints
 
 Hints prefer moves that build in suit, then moves that turn a face-down card up,

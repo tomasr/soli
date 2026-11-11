@@ -17,7 +17,7 @@ Building Soli has been fun. Yes, it's all Claude. Don't mind, don't care.
 | Game | Variants | In short |
 |---|---|---|
 | Klondike | Draw 1, Draw 3 | The classic: build down in alternating colours, move cards up to the foundations by suit. |
-| Spider | 1, 2 or 4 suits | Two decks, ten columns. Build full King-to-Ace runs of one suit to clear them. |
+| Spider | 1, 2 or 4 suits | Two decks, ten columns. Build full King-to-Ace runs of one suit to clear them. Deals are checked with a solver so every one can be won (`W` turns this off). |
 | FreeCell | Classic | Every card face up, four free cells. Deal numbers match the Microsoft deals. |
 | Cairn | Easy, Normal, Hard | An original game: two decks dealt into an overlapping layout, cleared by removing free cards in matching pairs, a bit like Mahjong solitaire. Every deal can be won. |
 

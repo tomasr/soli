@@ -82,7 +82,9 @@ always produces the same deal across versions. The status bar shows a deal
 number, and restarting (`R`) replays the same seed. FreeCell is the exception:
 it uses the Microsoft deal generator so its numbers match the classic Windows
 game. Cairn builds its deals around a solution so every deal can be won (see
-[cairn.md](cairn.md)).
+[cairn.md](cairn.md)). Spider can't be built that way, so it runs a solver
+over random deals until it finds one it can win (see [spider.md](spider.md)).
+The front end does that ahead of time on a background thread.
 
 ### Hints
 
@@ -107,6 +109,7 @@ The front end is a single-threaded macroquad loop in `main.rs` that computes a
 | `ui.rs` | Panels, keycaps, toasts |
 | `idle.rs` | Waiting for input while the table is at rest |
 | `persist.rs` | Settings and statistics as TOML |
+| `deals.rs` | Seeds for new deals, including finding winnable Spider deals in the background |
 
 ### Layout
 

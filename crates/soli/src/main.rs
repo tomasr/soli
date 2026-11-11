@@ -5,6 +5,7 @@
 mod anim;
 mod app;
 mod art;
+mod deals;
 mod glyphs;
 mod idle;
 mod layout;
@@ -121,11 +122,7 @@ async fn main() {
     }
 
     let mut app = match mode {
-        Mode::Play => {
-            let mut app = App::new(Settings::load(), Stats::load(), app::random_seed(), true);
-            app.open_game_chooser();
-            app
-        }
+        Mode::Play => App::launch(Settings::load(), Stats::load()),
         _ => {
             let args: Vec<String> = std::env::args().collect();
             let value_of = |flag: &str| {

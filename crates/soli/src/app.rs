@@ -1,5 +1,6 @@
 use crate::anim::{Animator, CardKey};
 use crate::art::{self, Animal};
+use crate::deals::Dealer;
 use crate::layout::Layout;
 use crate::persist::{Settings, Stats};
 use crate::render::{self, BACKS, TABLES};
@@ -7,7 +8,7 @@ use crate::ui::{self, format_time};
 use macroquad::prelude::*;
 use soli_core::{Card, Game, Hint, PileId, Variant};
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const DOUBLE_CLICK_SECS: f64 = 0.35;
 /// Pace of automatic moves (auto-move and auto-finish).
@@ -81,20 +82,13 @@ pub struct App {
     last_mouse: Vec2,
     pub settings: Settings,
     stats: Stats,
+    dealer: Dealer,
     /// Settings and stats are written to disk (off for screenshot runs).
     persist: bool,
 }
 
 fn key(card: Card) -> CardKey {
     card.id()
-}
-
-pub fn random_seed() -> u64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    nanos ^ (nanos >> 29)
 }
 
 impl App {
@@ -123,8 +117,21 @@ impl App {
             last_mouse: Vec2::ZERO,
             settings,
             stats,
+            dealer: Dealer::default(),
             persist,
         }
+    }
+
+    /// The app as launched: a new deal of the last game played, behind the
+    /// game chooser.
+    pub fn launch(settings: Settings, stats: Stats) -> Self {
+        let mut app = App::new(settings, stats, 0, true);
+        let variant = app.game.variant();
+        let seed = app.dealer.next_seed(variant, &mut app.settings);
+        app.game = variant.new_game(seed);
+        app.save_settings();
+        app.open_game_chooser();
+        app
     }
 
     /// Records an abandoned round as a loss. Call before replacing the game or
@@ -145,6 +152,7 @@ impl App {
         let stats = std::mem::take(&mut self.stats);
         let mut next = App::new(settings, stats, seed, self.persist);
         next.game = variant.new_game(seed);
+        next.dealer = std::mem::take(&mut self.dealer);
         next.toast = self.toast.take();
         *self = next;
     }
@@ -154,8 +162,15 @@ impl App {
         self.overlay = Overlay::None;
         self.settings.set_variant(variant);
         self.save_settings();
-        self.start_round(random_seed(), variant);
+        self.new_deal(variant);
         self.show_toast(variant.name());
+    }
+
+    /// Starts a new deal of `variant`.
+    fn new_deal(&mut self, variant: Variant) {
+        let seed = self.dealer.next_seed(variant, &mut self.settings);
+        self.save_settings();
+        self.start_round(seed, variant);
     }
 
     /// Opens the game chooser, as at startup. The current deal stays behind
@@ -568,7 +583,7 @@ impl App {
             return;
         }
         if is_key_pressed(KeyCode::F2) {
-            self.start_round(random_seed(), self.game.variant());
+            self.new_deal(self.game.variant());
         }
         if is_key_pressed(KeyCode::R) {
             self.start_round(self.game.seed(), self.game.variant());
@@ -581,6 +596,15 @@ impl App {
                 "Auto-move on"
             } else {
                 "Auto-move off"
+            });
+        }
+        if is_key_pressed(KeyCode::W) {
+            self.settings.winnable_deals = !self.settings.winnable_deals;
+            self.save_settings();
+            self.show_toast(if self.settings.winnable_deals {
+                "Winnable Spider deals on, from the next deal"
+            } else {
+                "Winnable Spider deals off, from the next deal"
             });
         }
         if is_key_pressed(KeyCode::T) {
@@ -621,6 +645,18 @@ impl App {
         let mouse: Vec2 = mouse_position().into();
         let now = get_time();
         self.handle_keys(layout);
+
+        // Have the next winnable deal ready for the game being played, or
+        // the one highlighted in the chooser.
+        if self.dealer.collect(&mut self.settings) {
+            self.save_settings();
+        }
+        let upcoming = if self.overlay == Overlay::Games {
+            self.menu_focus
+        } else {
+            self.game.variant()
+        };
+        self.dealer.prepare(upcoming, &self.settings);
 
         if self.overlay == Overlay::Games {
             let menu = GamesMenu::compute();
@@ -1229,7 +1265,7 @@ fn slot_label(variant: Variant, pile: PileId) -> Option<&'static str> {
 }
 
 fn draw_help() {
-    let entries: [(&str, &str); 14] = [
+    let entries: [(&str, &str); 15] = [
         ("Click stock", "Draw, recycle or deal"),
         ("Drag", "Move a card or run"),
         ("Click, click", "Pair two cards (Cairn)"),
@@ -1238,6 +1274,7 @@ fn draw_help() {
         ("Ctrl+Z", "Undo"),
         ("A", "Auto-finish when possible"),
         ("M", "Toggle auto-move to foundations"),
+        ("W", "Toggle winnable-only Spider deals"),
         ("N  /  N N", "Choose game  /  Same game again"),
         ("F2  /  R", "New deal  /  Restart deal"),
         ("T", "Change table colour"),

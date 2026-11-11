@@ -6,6 +6,8 @@ use crate::card::{Card, Suit};
 use crate::game::{Game, Hint, History, PileId, SpiderSuits, Variant};
 use crate::rng::SplitMix64;
 
+pub mod solver;
+
 const FOUNDATIONS: usize = 8;
 const TABLEAUS: usize = 10;
 
@@ -59,20 +61,46 @@ fn is_suited_run(cards: &[Card]) -> bool {
             .all(|w| w[0].suit == w[1].suit && w[0].rank == w[1].rank + 1)
 }
 
+/// The opening layout for `seed`: the ten columns and the stock.
+fn deal(seed: u64, suits: SpiderSuits) -> ([Vec<Card>; TABLEAUS], Vec<Card>) {
+    let mut deck = spider_deck(suits);
+    SplitMix64::new(seed).shuffle(&mut deck);
+
+    let mut tableau: [Vec<Card>; TABLEAUS] = Default::default();
+    for (i, pile) in tableau.iter_mut().enumerate() {
+        let n = if i < 4 { 6 } else { 5 };
+        for _ in 0..n {
+            pile.push(deck.pop().expect("deck has enough cards"));
+        }
+        pile.last_mut().unwrap().face_up = true;
+    }
+    (tableau, deck)
+}
+
+/// How many deals [`winnable_seed`] tries before settling for one it couldn't
+/// solve. The solver wins about a quarter of 4-suit deals, so running out is
+/// very unlikely.
+const WINNABLE_TRIES: usize = 40;
+
+/// A seed whose deal the solver can win: `seed` itself if it can, otherwise
+/// the first of a series of seeds derived from it. This takes a fraction of
+/// a second for most 4-suit deals and much less with fewer suits, but can run
+/// to several seconds, so a front end should call it off the UI thread.
+pub fn winnable_seed(seed: u64, suits: SpiderSuits) -> u64 {
+    let mut rng = SplitMix64::new(seed);
+    let mut candidate = seed;
+    for _ in 0..WINNABLE_TRIES {
+        if solver::solve(candidate, suits, &solver::Effort::DEFAULT).is_some() {
+            return candidate;
+        }
+        candidate = rng.next_u64();
+    }
+    candidate
+}
+
 impl Spider {
     pub fn new(seed: u64, suits: SpiderSuits) -> Self {
-        let mut deck = spider_deck(suits);
-        SplitMix64::new(seed).shuffle(&mut deck);
-
-        let mut tableau: [Vec<Card>; TABLEAUS] = Default::default();
-        for (i, pile) in tableau.iter_mut().enumerate() {
-            let n = if i < 4 { 6 } else { 5 };
-            for _ in 0..n {
-                pile.push(deck.pop().expect("deck has enough cards"));
-            }
-            pile.last_mut().unwrap().face_up = true;
-        }
-
+        let (tableau, deck) = deal(seed, suits);
         Spider {
             board: Board {
                 stock: deck,
