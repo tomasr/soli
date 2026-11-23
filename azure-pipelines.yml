@@ -1,0 +1,144 @@
+# Builds Soli for each platform and publishes the binaries as a GitHub release.
+#
+# Runs only when queued by hand. The release version is the `version` in
+# crates/soli/Cargo.toml, and the release is tagged v<version> on the commit
+# that was built, so bump the version in a commit before queueing a run.
+
+trigger: none
+pr: none
+
+variables:
+  githubConnection: github-tomasr
+
+stages:
+  - stage: Prepare
+    jobs:
+      - job: Version
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - bash: |
+              set -euo pipefail
+              version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/soli/Cargo.toml | head -n 1)
+              if [ -z "$version" ]; then
+                echo "##vso[task.logissue type=error]No version found in crates/soli/Cargo.toml"
+                exit 1
+              fi
+              if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+                echo "##vso[task.logissue type=error]Tag v$version already exists. Bump the version in crates/soli/Cargo.toml first."
+                exit 1
+              fi
+              echo "Releasing version $version"
+              echo "##vso[task.setvariable variable=VERSION;isOutput=true]$version"
+              echo "##vso[build.updatebuildnumber]$version ($(Build.BuildId))"
+            name: ver
+            displayName: Read version from Cargo.toml
+
+  - stage: Build
+    dependsOn: Prepare
+    variables:
+      version: $[ stageDependencies.Prepare.Version.outputs['ver.VERSION'] ]
+    jobs:
+      - job: Build
+        strategy:
+          matrix:
+            windows_x64:
+              imageName: windows-latest
+              target: x86_64-pc-windows-msvc
+              exe: soli.exe
+              archiveType: zip
+              archiveExt: zip
+            linux_x64:
+              imageName: ubuntu-latest
+              target: x86_64-unknown-linux-gnu
+              exe: soli
+              archiveType: tar
+              archiveExt: tar.gz
+            macos_arm64:
+              imageName: macos-latest
+              target: aarch64-apple-darwin
+              exe: soli
+              archiveType: tar
+              archiveExt: tar.gz
+        pool:
+          vmImage: $(imageName)
+        variables:
+          packageName: soli-$(version)-$(target)
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - bash: |
+              sudo apt-get update
+              sudo apt-get install -y libx11-dev libxi-dev libgl1-mesa-dev
+            displayName: Install Linux dependencies
+            condition: eq(variables['Agent.OS'], 'Linux')
+
+          - bash: |
+              set -euo pipefail
+              rustup update stable --no-self-update
+              rustup default stable
+              rustup target add $(target)
+              rustc --version
+              cargo --version
+            displayName: Install Rust
+
+          - bash: cargo test --workspace --release
+            displayName: Test
+
+          - bash: cargo build --release --locked -p soli --target $(target)
+            displayName: Build
+
+          - bash: |
+              set -euo pipefail
+              dir="$(Build.ArtifactStagingDirectory)/$(packageName)"
+              mkdir -p "$dir"
+              cp "target/$(target)/release/$(exe)" "$dir/"
+              cp LICENSE README.md crates/soli/assets/fonts/InterTight-LICENSE.txt "$dir/"
+            displayName: Stage files
+
+          - task: ArchiveFiles@2
+            displayName: Package
+            inputs:
+              rootFolderOrFile: $(Build.ArtifactStagingDirectory)/$(packageName)
+              includeRootFolder: true
+              archiveType: $(archiveType)
+              tarCompression: gz
+              archiveFile: $(Build.ArtifactStagingDirectory)/out/$(packageName).$(archiveExt)
+
+          - publish: $(Build.ArtifactStagingDirectory)/out
+            artifact: $(packageName)
+            displayName: Publish artifact
+
+  - stage: Release
+    dependsOn:
+      - Prepare
+      - Build
+    variables:
+      version: $[ stageDependencies.Prepare.Version.outputs['ver.VERSION'] ]
+    jobs:
+      - job: GitHubRelease
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: none
+          - download: current
+            displayName: Download artifacts
+          - task: GitHubRelease@1
+            displayName: Create GitHub release
+            inputs:
+              gitHubConnection: $(githubConnection)
+              repositoryName: $(Build.Repository.Name)
+              action: create
+              target: $(Build.SourceVersion)
+              tagSource: userSpecifiedTag
+              tag: v$(version)
+              title: Soli $(version)
+              assets: |
+                $(Pipeline.Workspace)/**/*.zip
+                $(Pipeline.Workspace)/**/*.tar.gz
+              addChangeLog: true
+              changeLogCompareToRelease: lastFullRelease
+              changeLogType: commitBased
