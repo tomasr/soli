@@ -1,4 +1,4 @@
-# Builds Soli for each platform and publishes the binaries as a GitHub release.
+# Builds Soli for Windows and publishes the binary as a GitHub release.
 #
 # Runs only when queued by hand. The release version is the `version` in
 # crates/soli/Cargo.toml, and the release is tagged v<version> on the commit
@@ -42,39 +42,15 @@ stages:
       version: $[ stageDependencies.Prepare.Version.outputs['ver.VERSION'] ]
     jobs:
       - job: Build
-        strategy:
-          matrix:
-            windows_x64:
-              imageName: windows-latest
-              target: x86_64-pc-windows-msvc
-              exe: soli.exe
-              archiveType: zip
-              archiveExt: zip
-            linux_x64:
-              imageName: ubuntu-latest
-              target: x86_64-unknown-linux-gnu
-              exe: soli
-              archiveType: tar
-              archiveExt: tar.gz
-            macos_arm64:
-              imageName: macos-latest
-              target: aarch64-apple-darwin
-              exe: soli
-              archiveType: tar
-              archiveExt: tar.gz
+        displayName: Build Windows x64
         pool:
-          vmImage: $(imageName)
+          vmImage: windows-latest
         variables:
-          packageName: soli-$(version)-$(target)
+          target: x86_64-pc-windows-msvc
+          packageName: soli-$(version)-windows-x64
         steps:
           - checkout: self
             fetchDepth: 1
-
-          - bash: |
-              sudo apt-get update
-              sudo apt-get install -y libx11-dev libxi-dev libgl1-mesa-dev
-            displayName: Install Linux dependencies
-            condition: eq(variables['Agent.OS'], 'Linux')
 
           - bash: |
               set -euo pipefail
@@ -95,7 +71,7 @@ stages:
               set -euo pipefail
               dir="$(Build.ArtifactStagingDirectory)/$(packageName)"
               mkdir -p "$dir"
-              cp "target/$(target)/release/$(exe)" "$dir/"
+              cp "target/$(target)/release/soli.exe" "$dir/"
               cp LICENSE README.md crates/soli/assets/fonts/InterTight-LICENSE.txt "$dir/"
             displayName: Stage files
 
@@ -104,9 +80,8 @@ stages:
             inputs:
               rootFolderOrFile: $(Build.ArtifactStagingDirectory)/$(packageName)
               includeRootFolder: true
-              archiveType: $(archiveType)
-              tarCompression: gz
-              archiveFile: $(Build.ArtifactStagingDirectory)/out/$(packageName).$(archiveExt)
+              archiveType: zip
+              archiveFile: $(Build.ArtifactStagingDirectory)/out/$(packageName).zip
 
           - publish: $(Build.ArtifactStagingDirectory)/out
             artifact: $(packageName)
@@ -136,9 +111,7 @@ stages:
               tagSource: userSpecifiedTag
               tag: v$(version)
               title: Soli $(version)
-              assets: |
-                $(Pipeline.Workspace)/**/*.zip
-                $(Pipeline.Workspace)/**/*.tar.gz
+              assets: $(Pipeline.Workspace)/**/*.zip
               addChangeLog: true
               changeLogCompareToRelease: lastFullRelease
               changeLogType: commitBased
